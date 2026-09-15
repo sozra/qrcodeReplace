@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QR 置换台</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <svg class="brand-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/>
+      <path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/>
+      <rect x="8" y="8" width="3" height="3" fill="currentColor" stroke="none"/>
+      <rect x="13" y="13" width="3" height="3" fill="currentColor" stroke="none"/>
+    </svg>
+    <span class="brand-name">QR 置换台</span>
+  </div>
+  <div class="topbar-actions">
+    <button id="btnCopy" class="btn ghost" disabled title="复制结果到剪贴板">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+      复制结果
+    </button>
+    <button id="btnDownload" class="btn primary" disabled title="下载 PNG">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+      下载 PNG
+    </button>
+  </div>
+</header>
+
+<main class="layout">
+
+  <section class="stage" id="stage">
+    <div class="dropzone" id="dropzone">
+      <svg class="drop-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>
+      <div class="drop-title">拖入图片，或直接 <kbd>⌘V</kbd> 粘贴</div>
+      <div class="drop-sub">也可以 <button class="linklike" id="btnBrowse">点击选择文件</button></div>
+    </div>
+    <canvas id="view" class="hidden"></canvas>
+    <div class="stage-draghint hidden" id="draghint">松开以载入图片</div>
+  </section>
+
+  <aside class="panel">
+
+    <div class="group">
+      <div class="group-label">替换内容</div>
+      <textarea id="inpText" rows="2" spellcheck="false">你还真扫啊</textarea>
+      <div class="chips" id="presets"></div>
+    </div>
+
+    <div class="group">
+      <div class="group-label">渲染</div>
+      <div class="optrow">
+        <span class="optname">容错等级</span>
+        <div class="seg" id="segEc">
+          <button data-ec="L">L</button>
+          <button data-ec="M" class="on">M</button>
+          <button data-ec="Q">Q</button>
+          <button data-ec="H">H</button>
+        </div>
+      </div>
+      <label class="optrow toggle">
+        <span class="optname">沿用原码版本<span class="optdesc">模块网格密度一致，肉眼难辨</span></span>
+        <input type="checkbox" id="chkMatch" checked><span class="switch"></span>
+      </label>
+    </div>
+
+    <div class="group grow">
+      <div class="group-label row">
+        <span>检测结果</span>
+        <button class="btn mini ghost" id="btnRescan" disabled title="重新扫描">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg>
+          重扫
+        </button>
+      </div>
+      <div class="dets" id="dets">
+        <div class="dets-empty" id="detsEmpty">尚未载入图片</div>
+      </div>
+    </div>
+
+  </aside>
+</main>
+
+<input type="file" id="fileInput" accept="image/*" hidden>
+<div class="toast" id="toast"></div>
+
+<script src="vendor/jsQR.js"></script>
+<script src="vendor/qrcode.js"></script>
+<script src="vendor/qrcode_UTF8.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
