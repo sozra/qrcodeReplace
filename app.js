@@ -8,11 +8,16 @@
 const state = {
   img: null,          // HTMLImageElement 原图
   srcCanvas: null,    // 原图自然尺寸画布（用于取色/导出底图）
+  srcName: null,      // 导入文件的原名（用于导出命名）
   detections: [],     // { id, data, version, loc:{tl,tr,br,bl}, enabled }
   text: "你还真扫啊",
   ec: "M",
   matchVersion: true,
+  reboxFor: null,     // 正在框选取票号区域的 detection
 };
+
+// 内容像取票号（纯数字，允许空格/短横）时才启用号码处理
+const NUM_RE = /^\d[\d\s-]{4,}\d$/;
 
 const PRESETS = [
   "你还真扫啊",
@@ -31,6 +36,7 @@ const DETECT_MAX_DIM = 1600;
 const $ = (id) => document.getElementById(id);
 const stage = $("stage"), dropzone = $("dropzone"), view = $("view");
 const draghint = $("draghint"), fileInput = $("fileInput");
+const btnImport = $("btnImport"), btnReimport = $("btnReimport");
 const inpText = $("inpText"), presetsBox = $("presets");
 const segEc = $("segEc"), chkMatch = $("chkMatch");
 const detsBox = $("dets"), detsEmpty = $("detsEmpty");
@@ -99,26 +105,31 @@ function samplePx(ctx, W, H, x, y) {
   return ctx.getImageData(x, y, 1, 1).data;
 }
 
+function pxLum(d) {
+  return 0.299 * d[0] + 0.587 * d[1] + 0.114 * d[2];
+}
+
 // 沿法向量向外扫描，返回与底色相近的连续区域宽度（即该侧静区宽度）
 function measureSide(ctx, W, H, a, b, normal, modulePx) {
-  const maxT = modulePx * 10;
+  // 标准静区为 4 个模块，外扩再多没有收益，只会盖住周边内容
+  const maxT = modulePx * 4;
   const step = Math.max(1, modulePx / 4);
+  // 沿边加密采样，避免漏掉不居中的文字
+  const K = [0.15, 0.28, 0.41, 0.54, 0.67, 0.8, 0.93];
   let ref = null, lastGood = 0;
   for (let t = step; t <= maxT; t += step) {
-    let ok = true;
-    const samples = [];
-    for (const k of [0.3, 0.5, 0.7]) {
-      const px = a.x + (b.x - a.x) * k + normal.x * t;
-      const py = a.y + (b.y - a.y) * k + normal.y * t;
-      const d = samplePx(ctx, W, H, px, py);
-      samples.push(d);
-      if (ref && Math.hypot(d[0] - ref[0], d[1] - ref[1], d[2] - ref[2]) > 48) ok = false;
-    }
-    if (!ref) ref = samples[1];
-    if (!ok) break;
+    const samples = K.map((k) => samplePx(ctx, W, H,
+      a.x + (b.x - a.x) * k + normal.x * t,
+      a.y + (b.y - a.y) * k + normal.y * t));
+    // 以最亮的采样点为底色基准，避开码边缘残留的深色像素
+    if (!ref) ref = samples.reduce((best, s) => (pxLum(s) > pxLum(best) ? s : best), samples[0]);
+    const hit = samples.some((d) =>
+      Math.hypot(d[0] - ref[0], d[1] - ref[1], d[2] - ref[2]) > 26);
+    if (hit) break;
     lastGood = t;
   }
-  return lastGood;
+  // 回退一步，把贴到文字抗锯齿边缘的那步让出来
+  return Math.min(Math.max(lastGood - step, modulePx * 0.4), maxT);
 }
 
 // 实测原码的真实外框（码区 + 各侧实际静区）与衬底色
@@ -245,9 +256,270 @@ function runDetection() {
   }
   for (const det of found) det.foot = measureFootprint(det);
   state.detections = found;
+  for (const det of found) suggestNumberRegion(det);
+}
+
+// ---------------------------------------------------------------- 取票号定位
+
+// 连续墨色列合并为笔画串（合并 1px 的抗锯齿空洞）
+function inkRuns(colInk) {
+  const runs = [];
+  for (let i = 0; i < colInk.length; i++) {
+    if (colInk[i] > 0) {
+      const last = runs[runs.length - 1];
+      if (last && i - last.x1 <= 2) last.x1 = i;
+      else runs.push({ x0: i, x1: i });
+    }
+  }
+  return runs;
+}
+
+// 在码的上方/下方寻找最深的横向文字带，作为取票号区域的候选
+function suggestNumberRegion(det) {
+  det.numMode = "off";
+  det.numRegion = null;
+  det.numDigits = null;
+  det._numAn = null;
+  if (!NUM_RE.test(det.data.trim())) return;
+
+  const ctx = state.srcCanvas.getContext("2d", { willReadFrequently: true });
+  const W = state.srcCanvas.width, H = state.srcCanvas.height;
+  const q = det.loc;
+  const sideLen = (Math.hypot(q.tr.x - q.tl.x, q.tr.y - q.tl.y) +
+                   Math.hypot(q.bl.x - q.tl.x, q.bl.y - q.tl.y)) / 2;
+  const modulePx = det.foot.modulePx;
+  const INK_LUM = 145;   // 只认足够深的字，过滤掉浅灰说明文字
+  const x0 = Math.max(0, Math.round(Math.min(q.tl.x, q.bl.x) - sideLen * 0.35));
+  const x1 = Math.min(W, Math.round(Math.max(q.tr.x, q.br.x) + sideLen * 0.35));
+  const yTop = Math.min(q.tl.y, q.tr.y);
+  const yBot = Math.max(q.bl.y, q.br.y);
+  const reach = sideLen * 0.6;   // 号码一般紧贴码区，搜太远容易捞到别的文字
+
+  const findBand = (yA, yB) => {
+    yA = Math.max(0, Math.round(yA)); yB = Math.min(H, Math.round(yB));
+    const sw = x1 - x0, sh = yB - yA;
+    if (sw < 8 || sh < 8) return null;
+    const data = ctx.getImageData(x0, yA, sw, sh).data;
+    const rowInk = new Uint32Array(sh);
+    for (let y = 0; y < sh; y++) {
+      let cnt = 0;
+      for (let x = 0; x < sw; x++) {
+        const i = (y * sw + x) * 4;
+        if (0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2] < INK_LUM) cnt++;
+      }
+      rowInk[y] = cnt;
+    }
+    const minCnt = Math.max(3, sw * 0.003);
+    const gapTol = Math.max(2, modulePx * 0.35);
+    const minH = Math.max(6, modulePx * 0.9);
+    const maxH = modulePx * 3.2; // 号码字高通常在 1~3 个模块之间，更高的是标题等其他内容
+    const bands = [];
+    for (let y = 0; y < sh; y++) {
+      if (rowInk[y] >= minCnt) {
+        const last = bands[bands.length - 1];
+        if (last && y - last.y1 <= gapTol) last.y1 = y;
+        else bands.push({ y0: y, y1: y });
+      }
+    }
+    const good = bands.filter((b) => {
+      const bh = b.y1 - b.y0 + 1;
+      return bh >= minH && bh <= maxH;
+    });
+    if (!good.length) return null;
+    // 号码通常是该区域里字最高的一行
+    good.sort((p, n) => (n.y1 - n.y0) - (p.y1 - p.y0));
+    const b = good[0];
+
+    // 该行内墨色列范围 + 列轮廓
+    const colInk = new Uint32Array(sw);
+    let ix0 = -1, ix1 = -1;
+    for (let x = 0; x < sw; x++) {
+      let cnt = 0;
+      for (let y = b.y0; y <= b.y1; y++) {
+        const i = (y * sw + x) * 4;
+        if (0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2] < INK_LUM) cnt++;
+      }
+      colInk[x] = cnt;
+      if (cnt > 0) { if (ix0 < 0) ix0 = x; ix1 = x; }
+    }
+    if (ix0 < 0) return null;
+
+    return {
+      x0: x0 + ix0, x1: x0 + ix1,
+      y0: yA + b.y0, y1: yA + b.y1,
+    };
+  };
+
+  // 优先取码下方的文字带，找不到再看上方
+  const band = findBand(yBot + modulePx * 1.5, yBot + reach) ||
+               findBand(yTop - reach, yTop - modulePx * 1.5);
+  if (!band) return;
+
+  const padX = (band.x1 - band.x0) * 0.06 + 2;
+  const padY = (band.y1 - band.y0) * 0.25 + 2;
+  const rx0 = Math.max(0, band.x0 - padX), ry0 = Math.max(0, band.y0 - padY);
+  const rx1 = Math.min(W, band.x1 + padX), ry1 = Math.min(H, band.y1 + padY);
+  det.numRegion = { x: rx0, y: ry0, w: rx1 - rx0, h: ry1 - ry0 };
+  // 只给出候选区域，默认不改动图像，由用户在卡片里主动选择遮盖/换号
+  det.numMode = "off";
 }
 
 // ---------------------------------------------------------------- rendering
+
+// ---------------------------------------------------------------- 取票号绘制
+
+// 分析号码区域：背景色、墨色、字形范围、空格分组（按区域坐标缓存）
+function analyzeNumber(det) {
+  const r = det.numRegion;
+  const sig = [r.x, r.y, r.w, r.h].map(Math.round).join(",");
+  if (det._numAn && det._numAn.sig === sig) return det._numAn;
+
+  const ctx = state.srcCanvas.getContext("2d", { willReadFrequently: true });
+  const W = state.srcCanvas.width, H = state.srcCanvas.height;
+  const rx = Math.max(0, Math.round(r.x)), ry = Math.max(0, Math.round(r.y));
+  const rw = Math.min(W - rx, Math.round(r.w)), rh = Math.min(H - ry, Math.round(r.h));
+  const an = { sig, bg: "#ffffff", empty: true };
+  if (rw < 4 || rh < 4) { det._numAn = an; return an; }
+
+  // 背景色：取区域外侧一圈的亮色像素
+  let br = 0, bgc = 0, bgg = 0, bgb = 0, blum = 0;
+  const ring = (x, y) => {
+    const d = samplePx(ctx, W, H, x, y);
+    const l = pxLum(d);
+    if (l > 150) { br += d[0]; bgg += d[1]; bgb += d[2]; blum += l; bgc++; }
+  };
+  for (let k = 0; k <= 4; k++) {
+    const fx = rx + ((rw - 1) * k) / 4, fy = ry + ((rh - 1) * k) / 4;
+    ring(fx, ry - 2); ring(fx, ry + rh + 1); ring(rx - 2, fy); ring(rx + rw + 1, fy);
+  }
+  let bgLum = 255;
+  if (bgc) {
+    br = Math.round(br / bgc); bgg = Math.round(bgg / bgc); bgb = Math.round(bgb / bgc);
+    an.bg = `rgb(${br},${bgg},${bgb})`;
+    bgLum = blum / bgc;
+  }
+
+  const img = ctx.getImageData(rx, ry, rw, rh).data;
+  const inkThr = bgLum - 60;
+  const lumAt = (x, y) => {
+    const i = (y * rw + x) * 4;
+    return 0.299 * img[i] + 0.587 * img[i + 1] + 0.114 * img[i + 2];
+  };
+
+  // 字形范围与墨色
+  let ix0 = -1, ix1 = -1, iy0 = -1, iy1 = -1, inkN = 0;
+  let cr = 0, cg = 0, cb = 0, cn = 0;
+  const coreThr = bgLum - 110;
+  for (let y = 0; y < rh; y++) {
+    for (let x = 0; x < rw; x++) {
+      const l = lumAt(x, y);
+      if (l >= inkThr) continue;
+      inkN++;
+      if (ix0 < 0 || x < ix0) ix0 = x;
+      if (x > ix1) ix1 = x;
+      if (iy0 < 0 || y < iy0) iy0 = y;
+      if (y > iy1) iy1 = y;
+      if (l < coreThr) {
+        const i = (y * rw + x) * 4;
+        cr += img[i]; cg += img[i + 1]; cb += img[i + 2]; cn++;
+      }
+    }
+  }
+  if (inkN < 8 || ix0 < 0) { det._numAn = an; return an; }
+
+  an.empty = false;
+  an.bounds = { x0: rx + ix0, x1: rx + ix1, y0: ry + iy0, y1: ry + iy1 };
+  an.ink = cn ? `rgb(${Math.round(cr / cn)},${Math.round(cg / cn)},${Math.round(cb / cn)})` : "#222222";
+
+  const L = Math.max(1, det.data.replace(/\D/g, "").length);
+  const spanH = iy1 - iy0 + 1;
+  const colInk = new Uint32Array(ix1 - ix0 + 1);
+  for (let x = ix0; x <= ix1; x++) {
+    let cnt = 0;
+    for (let y = iy0; y <= iy1; y++) if (lumAt(x, y) < inkThr) cnt++;
+    colInk[x - ix0] = cnt;
+  }
+  const runs = inkRuns(colInk);
+  // 每个数字通常是一个独立笔画串，标签（如“取票号”）在左边，
+  // 从右往左数 L 个笔画串即为号码本体，避免把标签当号码或切进号码中间
+  const numRuns = runs.slice(Math.max(0, runs.length - L));
+  const nx0 = ix0 + numRuns[0].x0, nx1 = ix0 + numRuns[numRuns.length - 1].x1;
+  const spanW = nx1 - nx0 + 1;
+  const pitch = spanW / L;
+  // 空格分组：间隙明显大于字距中位数的位置视为空格，每组位数 = 笔画串数
+  const gaps = [];
+  for (let i = 1; i < numRuns.length; i++) gaps.push(numRuns[i].x0 - numRuns[i - 1].x1 - 1);
+  const medGap = gaps.length ? [...gaps].sort((a, b) => a - b)[Math.floor((gaps.length - 1) / 2)] : 0;
+  const spaceThr = Math.max(3, medGap * 1.35);
+  const groups = [];
+  let cnt = 1;
+  for (let i = 1; i < numRuns.length; i++) {
+    if (gaps[i - 1] > spaceThr) { groups.push(cnt); cnt = 1; }
+    else cnt++;
+  }
+  groups.push(cnt);
+  an.groups = groups;
+  an.L = L;
+  an.numBounds = { x0: rx + nx0, x1: rx + nx1, y0: an.bounds.y0, y1: an.bounds.y1 };
+
+  // 按墨色密度估一个字重，让新号码粗细接近原来的
+  const density = inkN / (spanW * spanH);
+  an.weight = density > 0.3 ? 700 : density > 0.2 ? 600 : 500;
+
+  det._numAn = an;
+  return an;
+}
+
+function genDigits(det, L) {
+  const orig = det.data.replace(/\D/g, "");
+  let s = "";
+  do {
+    s = "";
+    for (let i = 0; i < L; i++) s += Math.floor(Math.random() * 10);
+  } while (s === orig);
+  return s;
+}
+
+function groupDigits(digits, groups) {
+  if (!groups || !groups.length) return digits;
+  const out = [];
+  let i = 0;
+  for (const g of groups) { out.push(digits.slice(i, i + g)); i += g; }
+  if (i < digits.length) out.push(digits.slice(i));
+  return out.filter(Boolean).join(" ");
+}
+
+function drawNumberRegion(ctx, det) {
+  const r = det.numRegion;
+  const an = analyzeNumber(det);
+  ctx.fillStyle = an.bg;
+  // 遮盖模式：整块盖掉；换号模式：只盖号码本体，保留“取票号”等标签
+  if (det.numMode !== "replace" || an.empty) {
+    ctx.fillRect(r.x, r.y, r.w, r.h);
+    return;
+  }
+
+  if (!det.numDigits) det.numDigits = genDigits(det, an.L);
+  const text = groupDigits(det.numDigits, an.groups);
+  const nb = an.numBounds;
+  const bh = nb.y1 - nb.y0 + 1;
+  const bw = nb.x1 - nb.x0 + 1;
+  const padX = Math.max(2, (bw / an.L) * 0.35);
+  const padY = Math.max(2, bh * 0.18);
+  ctx.fillRect(nb.x0 - padX, nb.y0 - padY, bw + padX * 2, bh + padY * 2);
+  const fam = '"Helvetica Neue", Helvetica, Arial, "PingFang SC", sans-serif';
+  let size = bh / 0.72;   // 数字帽高约为字号的 0.72
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.font = `${an.weight} ${size}px ${fam}`;
+  const tw = ctx.measureText(text).width;
+  if (tw > 0) size *= Math.min(1.15, Math.max(0.7, bw / tw));
+  ctx.font = `${an.weight} ${size}px ${fam}`;
+  ctx.fillStyle = an.ink;
+  ctx.fillText(text,
+    (nb.x0 + nb.x1) / 2,
+    (nb.y0 + nb.y1) / 2 + size * 0.03);
+}
 
 function buildQR(version) {
   const text = state.text;
@@ -299,6 +571,12 @@ function renderResult() {
       }
     }
   }
+
+  // 取票号区域（遮盖 / 换号）
+  for (const det of state.detections) {
+    if (det.numMode === "off" || !det.numRegion) continue;
+    drawNumberRegion(ctx, det);
+  }
 }
 
 function renderView() {
@@ -331,6 +609,27 @@ function renderView() {
     ctx.fillStyle = "#1d1605";
     ctx.fillText(String(det.id), bx, by + badgeR * 0.05);
   }
+
+  // 取票号区域标注（不进导出结果）
+  for (const det of state.detections) {
+    if (det.numMode === "off" || !det.numRegion) continue;
+    const r = det.numRegion;
+    ctx.strokeStyle = "#4cc2ff";
+    ctx.lineWidth = lw;
+    ctx.setLineDash([lw * 2.5, lw * 2.5]);
+    ctx.strokeRect(r.x, r.y, r.w, r.h);
+    ctx.setLineDash([]);
+    const hs = lw * 3.2;
+    ctx.fillStyle = "#4cc2ff";
+    for (const [cx, cy] of [[r.x, r.y], [r.x + r.w, r.y], [r.x + r.w, r.y + r.h], [r.x, r.y + r.h]]) {
+      ctx.fillRect(cx - hs / 2, cy - hs / 2, hs, hs);
+    }
+    ctx.font = `600 ${badgeR * 0.8}px -apple-system, "PingFang SC", sans-serif`;
+    ctx.textAlign = "left";
+    ctx.fillStyle = "#4cc2ff";
+    ctx.fillText("取票号", r.x + lw * 2, r.y + badgeR * 0.9);
+    ctx.textAlign = "center";
+  }
 }
 
 // ---------------------------------------------------------------- detections list
@@ -356,13 +655,55 @@ function renderDetList() {
     const el = document.createElement("div");
     el.className = "det" + (det.enabled ? "" : " off");
     el.innerHTML = `
-      <div class="det-badge">${det.id}</div>
-      <div class="det-body">
-        <div class="det-data" title="${escapeHtml(det.data)}">${escapeHtml(det.data)}</div>
-        <div class="det-meta">v${det.version || "?"} · ${n}×${n} · 点击卡片或图上标记可切换</div>
-      </div>
-      ${det.enabled ? EYE_ON : EYE_OFF}`;
+      <div class="det-main">
+        <div class="det-badge">${det.id}</div>
+        <div class="det-body">
+          <div class="det-data" title="${escapeHtml(det.data)}">${escapeHtml(det.data)}</div>
+          <div class="det-meta">v${det.version || "?"} · ${n}×${n} · 点击卡片或图上标记可切换</div>
+        </div>
+        ${det.enabled ? EYE_ON : EYE_OFF}
+      </div>`;
     el.addEventListener("click", () => toggleDet(det.id));
+
+    // 内容像取票号：提供号码处理（遮盖 / 随机换号）
+    if (NUM_RE.test(det.data.trim())) {
+      const row = document.createElement("div");
+      row.className = "det-num";
+      row.innerHTML = `
+        <span class="det-num-label">取票号</span>
+        <div class="seg seg-tiny">
+          <button data-m="off" class="${det.numMode === "off" ? "on" : ""}">关</button>
+          <button data-m="cover" class="${det.numMode === "cover" ? "on" : ""}">遮盖</button>
+          <button data-m="replace" class="${det.numMode === "replace" ? "on" : ""}">换号</button>
+        </div>
+        <button class="btn mini ghost" data-act="rebox" title="在图上拖拽，重新框选号码区域">框选</button>
+        ${det.numMode === "replace"
+          ? '<button class="btn mini ghost" data-act="reshuffle" title="重新生成一个随机号码">换一注</button>'
+          : ""}`;
+      row.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const mBtn = e.target.closest("button[data-m]");
+        const actBtn = e.target.closest("button[data-act]");
+        if (mBtn) {
+          det.numMode = mBtn.dataset.m;
+          if (det.numMode !== "off" && !det.numRegion) {
+            state.reboxFor = det;
+            toast("在图上拖拽，框选取票号区域");
+          }
+          renderView();
+          renderDetList();
+        } else if (actBtn) {
+          if (actBtn.dataset.act === "rebox") {
+            state.reboxFor = det;
+            toast("在图上拖拽，框选取票号区域");
+          } else {
+            det.numDigits = null;
+            renderView();
+          }
+        }
+      });
+      el.appendChild(row);
+    }
     detsBox.appendChild(el);
   }
 }
@@ -383,6 +724,7 @@ function toggleDet(id) {
 
 function loadImage(img) {
   state.img = img;
+  state.reboxFor = null;
   const c = document.createElement("canvas");
   c.width = img.naturalWidth; c.height = img.naturalHeight;
   c.getContext("2d").drawImage(img, 0, 0);
@@ -390,6 +732,7 @@ function loadImage(img) {
 
   dropzone.classList.add("hidden");
   view.classList.remove("hidden");
+  btnReimport.classList.remove("hidden");
   btnCopy.disabled = false;
   btnDownload.disabled = false;
   btnRescan.disabled = false;
@@ -404,6 +747,7 @@ function loadImage(img) {
 
 function loadFile(file) {
   if (!file || !file.type.startsWith("image/")) { toast("请选择图片文件"); return; }
+  state.srcName = file.name || null;
   const url = URL.createObjectURL(file);
   const img = new Image();
   img.onload = () => { loadImage(img); URL.revokeObjectURL(url); };
@@ -415,7 +759,15 @@ function loadFile(file) {
 
 dropzone.addEventListener("click", () => fileInput.click());
 $("btnBrowse").addEventListener("click", (e) => { e.stopPropagation(); fileInput.click(); });
+btnImport.addEventListener("click", () => fileInput.click());
+btnReimport.addEventListener("click", () => fileInput.click());
 fileInput.addEventListener("change", () => { loadFile(fileInput.files[0]); fileInput.value = ""; });
+
+// 触屏设备没有拖拽和 ⌘V，换成贴合实际操作的提示
+if (window.matchMedia && matchMedia("(pointer: coarse)").matches) {
+  dropzone.querySelector(".drop-title").textContent = "点这里选择图片";
+  dropzone.querySelector(".drop-sub").textContent = "从相册或文件中导入，之后可点右下角按钮换图";
+}
 
 document.addEventListener("paste", (e) => {
   for (const item of e.clipboardData.items) {
@@ -441,17 +793,134 @@ document.addEventListener("drop", (e) => {
   loadFile(e.dataTransfer.files[0]);
 });
 
-view.addEventListener("click", (e) => {
+// 视图坐标（CSS 像素 → 图像像素）
+function viewPos(e) {
   const rect = view.getBoundingClientRect();
-  const x = ((e.clientX - rect.left) / rect.width) * view.width;
-  const y = ((e.clientY - rect.top) / rect.height) * view.height;
+  return {
+    x: ((e.clientX - rect.left) / rect.width) * view.width,
+    y: ((e.clientY - rect.top) / rect.height) * view.height,
+    scale: view.width / rect.width,
+  };
+}
+
+const clampNum = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
+let dragInfo = null;
+
+// 拖拽期间合并重绘：每个 animation frame 至多渲染一次
+let viewRaf = 0;
+function scheduleRenderView() {
+  if (viewRaf) return;
+  viewRaf = requestAnimationFrame(() => { viewRaf = 0; renderView(); });
+}
+
+view.addEventListener("pointerdown", (e) => {
+  if (!state.img) return;
+  const { x, y, scale } = viewPos(e);
+
+  // 框选模式：直接开始拖一个新区域
+  if (state.reboxFor) {
+    dragInfo = {
+      kind: "rebox", det: state.reboxFor, x0: x, y0: y,
+      prev: state.reboxFor.numRegion, prevMode: state.reboxFor.numMode,
+    };
+    if (state.reboxFor.numMode === "off") state.reboxFor.numMode = "replace";
+    view.setPointerCapture(e.pointerId);
+    return;
+  }
+
+  // 号码区域：四角缩放优先，其次内部拖动
+  const tol = 10 * scale;
   for (let i = state.detections.length - 1; i >= 0; i--) {
     const det = state.detections[i];
-    if (pointInQuad(x, y, det.foot.quad)) {
-      toggleDet(det.id);
+    if (det.numMode === "off" || !det.numRegion) continue;
+    const r = det.numRegion;
+    const corners = [
+      { c: "tl", px: r.x, py: r.y }, { c: "tr", px: r.x + r.w, py: r.y },
+      { c: "br", px: r.x + r.w, py: r.y + r.h }, { c: "bl", px: r.x, py: r.y + r.h },
+    ];
+    for (const cn of corners) {
+      if (Math.abs(x - cn.px) <= tol && Math.abs(y - cn.py) <= tol) {
+        dragInfo = { kind: "resize", det, corner: cn.c, orig: { ...r } };
+        view.setPointerCapture(e.pointerId);
+        return;
+      }
+    }
+    if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) {
+      dragInfo = { kind: "move", det, dx: x - r.x, dy: y - r.y };
+      view.setPointerCapture(e.pointerId);
       return;
     }
   }
+
+  dragInfo = { kind: "click", x0: x, y0: y, scale };
+});
+
+view.addEventListener("pointermove", (e) => {
+  if (!dragInfo || dragInfo.kind === "click") return;
+  const { x, y } = viewPos(e);
+  const d = dragInfo;
+  const W = view.width, H = view.height;
+  if (d.kind === "move") {
+    const r = d.det.numRegion;
+    r.x = clampNum(x - d.dx, 0, W - r.w);
+    r.y = clampNum(y - d.dy, 0, H - r.h);
+    d.det._numAn = null;
+  } else if (d.kind === "resize") {
+    const r = d.det.numRegion, o = d.orig;
+    let nx0 = o.x, ny0 = o.y, nx1 = o.x + o.w, ny1 = o.y + o.h;
+    if (d.corner.includes("l")) nx0 = Math.min(x, nx1 - 8);
+    if (d.corner.includes("r")) nx1 = Math.max(x, nx0 + 8);
+    if (d.corner.includes("t")) ny0 = Math.min(y, ny1 - 8);
+    if (d.corner.includes("b")) ny1 = Math.max(y, ny0 + 8);
+    r.x = clampNum(nx0, 0, W); r.y = clampNum(ny0, 0, H);
+    r.w = clampNum(nx1, 0, W) - r.x; r.h = clampNum(ny1, 0, H) - r.y;
+    d.det._numAn = null;
+  } else if (d.kind === "rebox") {
+    const cx = clampNum(x, 0, W), cy = clampNum(y, 0, H);
+    d.det.numRegion = {
+      x: Math.min(d.x0, cx), y: Math.min(d.y0, cy),
+      w: Math.abs(cx - d.x0), h: Math.abs(cy - d.y0),
+    };
+    d.det._numAn = null;
+  }
+  scheduleRenderView();
+});
+
+view.addEventListener("pointerup", (e) => {
+  if (!dragInfo) return;
+  const d = dragInfo;
+  dragInfo = null;
+  if (d.kind === "click") {
+    const { x, y, scale } = viewPos(e);
+    if (Math.hypot(x - d.x0, y - d.y0) >= 6 * scale) return;
+    for (let i = state.detections.length - 1; i >= 0; i--) {
+      const det = state.detections[i];
+      if (pointInQuad(x, y, det.foot.quad)) { toggleDet(det.id); return; }
+    }
+    return;
+  }
+  if (d.kind === "rebox") {
+    const r = d.det.numRegion;
+    if (!r || r.w < 8 || r.h < 8) {
+      // 框选无效：还原区域和模式
+      d.det.numRegion = d.prev || null;
+      d.det.numMode = d.prevMode;
+    }
+    state.reboxFor = null;
+  }
+  renderView();
+  renderDetList();
+});
+
+view.addEventListener("pointercancel", () => {
+  if (dragInfo && dragInfo.kind === "rebox") {
+    // 触摸被系统手势打断：还原半截框选
+    dragInfo.det.numRegion = dragInfo.prev || null;
+    dragInfo.det.numMode = dragInfo.prevMode;
+    state.reboxFor = null;
+  }
+  dragInfo = null;
+  renderView();
 });
 
 // ---------------------------------------------------------------- controls
@@ -489,12 +958,27 @@ btnRescan.addEventListener("click", () => {
   toast(state.detections.length ? `检测到 ${state.detections.length} 个二维码` : "仍未检测到二维码");
 });
 
+// 导出文件名：沿用原图名 + 时间戳 + 序号，保证多次保存互不覆盖
+let saveSeq = 0;
+function exportName() {
+  saveSeq++;
+  const now = new Date();
+  const p = (n, l) => String(n).padStart(l || 2, "0");
+  const ts = `${now.getFullYear()}${p(now.getMonth() + 1)}${p(now.getDate())}-` +
+             `${p(now.getHours())}${p(now.getMinutes())}${p(now.getSeconds())}`;
+  let base = (state.srcName || "").replace(/\.[a-z0-9]+$/i, "")
+    .replace(/[\\/:*?"<>|]+/g, "_").trim().slice(0, 60);
+  const hasBase = !!base && !/^image$/i.test(base);
+  if (!hasBase) base = "qr-replaced";
+  return `${hasBase ? base + "-qr" : base}-${ts}-${p(saveSeq)}.png`;
+}
+
 btnDownload.addEventListener("click", () => {
   renderResult();
   resultCanvas.toBlob((blob) => {
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = "qr-replaced.png";
+    a.download = exportName();
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 5000);
     toast("已导出 PNG");

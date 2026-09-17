@@ -19,13 +19,17 @@
     <span class="brand-name">QR 置换台</span>
   </div>
   <div class="topbar-actions">
-    <button id="btnCopy" class="btn ghost" disabled title="复制结果到剪贴板">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-      复制结果
+    <button id="btnImport" class="btn ghost" title="导入新图片" aria-label="导入新图片">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+      <span class="btn-label">导入图片</span>
     </button>
-    <button id="btnDownload" class="btn primary" disabled title="下载 PNG">
+    <button id="btnCopy" class="btn ghost" disabled title="复制结果到剪贴板" aria-label="复制结果到剪贴板">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+      <span class="btn-label">复制结果</span>
+    </button>
+    <button id="btnDownload" class="btn primary" disabled title="下载 PNG" aria-label="下载 PNG">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-      下载 PNG
+      <span class="btn-label">下载 PNG</span>
     </button>
   </div>
 </header>
@@ -39,6 +43,9 @@
       <div class="drop-sub">也可以 <button class="linklike" id="btnBrowse">点击选择文件</button></div>
     </div>
     <canvas id="view" class="hidden"></canvas>
+    <button class="fab hidden" id="btnReimport" title="换一张图" aria-label="换一张图">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+    </button>
     <div class="stage-draghint hidden" id="draghint">松开以载入图片</div>
   </section>
 
