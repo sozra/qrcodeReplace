@@ -42,7 +42,28 @@
       <div class="drop-title">拖入图片，或直接 <kbd>⌘V</kbd> 粘贴</div>
       <div class="drop-sub">也可以 <button class="linklike" id="btnBrowse">点击选择文件</button></div>
     </div>
-    <canvas id="view" class="hidden"></canvas>
+    <div class="editor-toolbar hidden" id="editorToolbar" role="toolbar" aria-label="图片编辑工具">
+      <button id="btnUndo" class="btn mini ghost" disabled title="撤销上一步（⌘/Ctrl Z）" aria-label="撤销上一步">撤销</button>
+      <button id="btnRedo" class="btn mini ghost" disabled title="重做（⌘/Ctrl Shift Z）" aria-label="重做">重做</button>
+      <span class="toolbar-divider" aria-hidden="true"></span>
+      <button id="btnAddQr" class="btn mini ghost" title="框选遗漏的二维码，再调整四角" aria-label="手动框选二维码" aria-pressed="false">手动框选</button>
+      <button id="btnPan" class="btn mini ghost" title="拖动图片以平移视图" aria-label="平移图片" aria-pressed="false">平移</button>
+      <button id="btnCompare" class="btn mini ghost" title="切换查看原图" aria-label="切换查看原图" aria-pressed="false">原图</button>
+      <div class="zoom-controls" role="group" aria-label="图片缩放">
+        <button id="btnZoomOut" class="btn mini ghost zoom-button" title="缩小图片" aria-label="缩小图片">−</button>
+        <span id="zoomLabel" class="zoom-label" aria-live="polite">100%</span>
+        <button id="btnZoomIn" class="btn mini ghost zoom-button" title="放大图片" aria-label="放大图片">+</button>
+        <button id="btnFit" class="btn mini ghost" title="让整张图片适应预览区域" aria-label="适应预览区域">适应</button>
+      </div>
+    </div>
+    <div id="viewport" class="viewport hidden" aria-label="图片预览">
+      <canvas id="view" class="hidden" aria-label="图片编辑画布"></canvas>
+    </div>
+    <div id="editorHint" class="editor-hint hidden" role="status">
+      <span id="editorHintText"></span>
+      <button id="btnCancelEdit" class="btn mini ghost hidden" title="取消当前操作（Escape）" aria-label="取消当前操作">取消</button>
+    </div>
+    <div id="renderError" class="render-error hidden" role="alert"></div>
     <button class="fab hidden" id="btnReimport" title="换一张图" aria-label="换一张图">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
     </button>
@@ -52,8 +73,8 @@
   <aside class="panel">
 
     <div class="group">
-      <div class="group-label">替换内容</div>
-      <textarea id="inpText" rows="2" spellcheck="false">你还真扫啊</textarea>
+      <label class="group-label" id="textLabel" for="inpText">替换内容</label>
+      <textarea id="inpText" rows="2" spellcheck="false" aria-labelledby="textLabel">你还真扫啊</textarea>
       <div class="chips" id="presets"></div>
     </div>
 
@@ -72,6 +93,15 @@
         <span class="optname">沿用原码版本<span class="optdesc">模块网格密度一致，肉眼难辨</span></span>
         <input type="checkbox" id="chkMatch" checked><span class="switch"></span>
       </label>
+    </div>
+
+    <div class="group validation-group">
+      <div class="group-label row">
+        <span>扫描验证</span>
+        <button class="btn mini ghost" id="btnVerify" disabled title="重新扫描最终图片，检查替换内容" aria-label="验证替换结果">验证结果</button>
+      </div>
+      <p id="validationSummary" class="validation-summary">导出前将自动验证替换结果</p>
+      <div id="validationResults" class="validation-results" aria-live="polite" aria-atomic="true"></div>
     </div>
 
     <div class="group grow">
@@ -93,9 +123,20 @@
 <input type="file" id="fileInput" accept="image/*" hidden>
 <div class="toast" id="toast"></div>
 
+<dialog id="exportDialog" class="export-dialog" aria-labelledby="exportDialogTitle" aria-describedby="exportDialogMessage">
+  <h2 id="exportDialogTitle">请检查扫描验证结果</h2>
+  <p id="exportDialogMessage">部分替换区域未通过验证，导出的二维码可能无法正确扫描。</p>
+  <div class="dialog-actions">
+    <button id="btnExportCancel" class="btn ghost" autofocus>返回检查</button>
+    <button id="btnExportAnyway" class="btn primary">仍然导出</button>
+  </div>
+</dialog>
+
 <script src="vendor/jsQR.js"></script>
 <script src="vendor/qrcode.js"></script>
 <script src="vendor/qrcode_UTF8.js"></script>
+<script src="qr-validation.js"></script>
+<script src="history.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
