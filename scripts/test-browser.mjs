@@ -5,11 +5,17 @@ import { extname, resolve, sep } from 'node:path';
 import { once } from 'node:events';
 import { chromium } from 'playwright';
 
+const { default: billingWorker } = await import(`data:text/javascript;base64,${(await readFile('dist/_worker.js')).toString('base64')}`);
+
 const root = resolve('dist');
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json' };
 const server = createServer(async (request, response) => {
   try {
     const pathname = decodeURIComponent(new URL(request.url, 'http://localhost').pathname);
+    if (pathname.startsWith('/api/')) {
+      const result = await billingWorker.fetch(new Request(`http://localhost${request.url}`), {});
+      response.writeHead(result.status, Object.fromEntries(result.headers)); response.end(await result.text()); return;
+    }
     const file = resolve(root, `.${pathname === '/' ? '/index.html' : pathname}`);
     if (!file.startsWith(`${root}${sep}`)) { response.writeHead(403).end(); return; }
     const body = await readFile(file);
@@ -74,6 +80,10 @@ try {
     console.log(`${file}: ${result.passed} checks passed.`);
   }
   assert.deepEqual(errors, [], 'No browser errors or failed asset requests');
+  for (const file of suites.filter(file => file.endsWith('.browser.mjs')).sort()) {
+    const { run } = await import(`../tests/${file}`);
+    await run({ browser, url });
+  }
 } finally {
   await browser?.close();
   await new Promise(resolve => server.close(resolve));

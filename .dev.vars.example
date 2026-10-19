@@ -1,0 +1,8 @@
+# Run npm run setup:billing to create a private .dev.vars with a random Cookie key.
+# Paste your Stripe sandbox secret key only in .dev.vars, never in chat or source.
+BILLING_EXPERIMENT=exports
+BILLING_ORIGIN=http://127.0.0.1:8788
+STRIPE_SECRET_KEY=
+STRIPE_PRICE_LIFETIME=
+STRIPE_PRICE_MONTHLY=
+BILLING_COOKIE_SECRET=

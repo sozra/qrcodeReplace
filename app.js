@@ -1134,6 +1134,10 @@ async function blobCanvas(blob) {
 }
 async function verifyResult(action = "verify") {
   if (!state.img || validationRun || dragInfo || scanRun) return;
+  const requestedRevision = revision;
+  if (action !== "verify" && !await window.QRBilling.requireExport()) return;
+  if (revision !== requestedRevision) { toast("图片已修改，请重新导出"); return; }
+  if (!state.img || validationRun || dragInfo || scanRun) return;
   commitHistory(); if (!renderResult()) { renderView(false); toast(renderError); return; }
   const token = revision, controller = new AbortController(), run = { controller };
   const detections = JSON.parse(JSON.stringify(state.detections.map(d => ({ id: d.id, enabled: d.enabled && d.mode === "replace", loc: d.loc, version: d.version, generatedVersion: d.generatedVersion, expectedText: d.text, mode: d.mode }))));

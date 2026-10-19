@@ -7,6 +7,9 @@
     "check": "node scripts/check.mjs",
     "build": "node scripts/build.mjs",
     "test:browser": "node scripts/test-browser.mjs",
+    "test:pages": "node scripts/test-pages.mjs",
+    "dev:billing": "wrangler pages dev dist --ip 127.0.0.1 --port 8788 --compatibility-date 2026-10-19",
+    "setup:billing": "node scripts/setup-billing.mjs",
     "deploy": "wrangler pages deploy dist --project-name qr-replace --branch main",
     "verify:deployment": "node scripts/verify-deployment.mjs"
   },

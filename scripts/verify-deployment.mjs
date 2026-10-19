@@ -21,6 +21,10 @@ for (let attempt = 1; attempt <= 6; attempt++) {
       const body = Buffer.from(await (await get(`/${file}`)).arrayBuffer());
       assert.equal(createHash('sha256').update(body).digest('hex'), hash, `${file} must match the build artifact`);
     }
+    if (expected.server) {
+      const runtime = await (await get('/api/deployment')).json();
+      assert.deepEqual(runtime, { commit: expected.commit, ...expected.server }, 'Pages API must report this server build');
+    }
     console.log(`Verified ${base.origin}: HTTP 200 and all asset hashes match ${expected.commit}.`);
     break;
   } catch (error) {

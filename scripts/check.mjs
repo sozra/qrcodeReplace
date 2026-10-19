@@ -7,7 +7,7 @@ function run(args) {
   if (result.status !== 0) process.exit(result.status ?? 1);
 }
 
-for (const directory of ['.', 'scripts', 'tests']) {
+for (const directory of ['.', 'scripts', 'tests', 'server']) {
   const files = await readdir(directory).catch(error => {
     if (error.code === 'ENOENT' && directory === 'tests') return [];
     throw error;

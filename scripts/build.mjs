@@ -2,7 +2,7 @@ import { cp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 
-// Package the static app without compiling or changing browser code.
+// Keep the browser app unchanged; package the optional Pages billing backend separately.
 await rm('dist', { recursive: true, force: true });
 await mkdir('dist');
 for (const file of (await readdir('.')).sort()) {
@@ -30,5 +30,12 @@ async function hashes(directory, prefix = '') {
 }
 
 const commit = process.env.GITHUB_SHA || execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
-await writeFile('dist/_deployment.json', `${JSON.stringify({ commit, files: await hashes('dist') }, null, 2)}\n`);
-console.log(`Static site packaged in dist/ for ${commit}.`);
+const files = await hashes('dist');
+const source = await readFile('server/billing.mjs', 'utf8');
+const routes = `${JSON.stringify({ version: 1, include: ['/api/*'], exclude: [] }, null, 2)}\n`;
+const server = { sourceSha256: createHash('sha256').update(source).digest('hex'), routesSha256: createHash('sha256').update(routes).digest('hex') };
+await writeFile('dist/_worker.js', `const QR_DEPLOYMENT = ${JSON.stringify({ commit, ...server })};\n${source}`);
+await writeFile('dist/_routes.json', routes);
+// Pages executes these two files; they are not publicly downloadable static assets.
+await writeFile('dist/_deployment.json', `${JSON.stringify({ commit, files, server }, null, 2)}\n`);
+console.log(`Static site and optional Pages billing API packaged in dist/ for ${commit}.`);

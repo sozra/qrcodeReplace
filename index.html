@@ -77,6 +77,13 @@
 
   <aside class="panel">
 
+    <section id="billingPanel" class="group billing-panel hidden" aria-labelledby="billingLabel">
+      <div class="group-label row"><h2 id="billingLabel">付费体验</h2><span class="billing-badge">测试模式</span></div>
+      <p id="billingSummary" class="field-hint" role="status"></p>
+      <button id="billingOpen" class="btn ghost">查看测试方案</button>
+      <div id="billingAd" class="billing-ad hidden" aria-label="广告占位区">广告展示区域 · 仅用于体验免广告效果<br><small>尚未接入 Google AdSense</small></div>
+    </section>
+
     <section class="group targets-group" aria-labelledby="targetsLabel">
       <div class="group-label row">
         <h2 id="targetsLabel"><span class="step-number">1</span> 选择处理目标</h2>
@@ -204,6 +211,19 @@
 <script src="history.js"></script>
 <script src="preferences.js"></script>
 <script src="qr-detection.js"></script>
+<dialog id="billingDialog" class="export-dialog billing-dialog" aria-labelledby="billingTitle" aria-describedby="billingMessage">
+  <div class="billing-heading"><h2 id="billingTitle">解锁 QR 置换台</h2><span class="billing-badge">Stripe 测试</span></div>
+  <p id="billingMessage" role="status"></p>
+  <p id="billingBenefit"></p>
+  <div id="billingPlans" class="billing-plans"></div>
+  <p class="billing-note">仅使用 Stripe 测试卡。付款在新标签页完成，当前图片与编辑会保留。权益保存在此浏览器的 Cookie 中，清除 Cookie 或更换设备后无法恢复；正式收费前会增加账号恢复机制。</p>
+  <div class="dialog-actions billing-actions">
+    <button id="billingPortal" class="btn ghost hidden">管理订阅 / 账单</button>
+    <button id="billingRefresh" class="btn ghost">刷新购买状态</button>
+    <button id="billingClose" class="btn primary" autofocus>返回编辑</button>
+  </div>
+</dialog>
+<script src="billing.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

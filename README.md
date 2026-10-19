@@ -148,3 +148,64 @@ npm run verify:deployment
 ```
 
 此仓库不管理 Cloudflare 线上变量、Secret 或绑定，不添加 `wrangler.jsonc`，不运行 `pages secret` 或更新项目配置的命令。后续发布只上传静态产物，线上配置继续在 Cloudflare 控制台管理。部署失败时，在 [Actions](https://github.com/sozra/qrcodeReplace/actions) 检查日志并重新运行；回退可在 Cloudflare Pages 的生产部署记录中选择已成功的部署。
+
+## Stripe 沙盒收费实验
+
+此实验在上述静态应用之外增加可选的 **Pages Functions Advanced Mode** 支付接口，仍使用现有 `qr-replace` Pages Direct Upload，不创建或迁移到独立 Workers 项目。浏览器代码保持直接打开 `index.html` 的能力；二维码识别、图片处理和导出仍在本机完成。支付接口只处理购买状态，不接收图片或二维码内容。
+
+默认 `BILLING_EXPERIMENT=off`，原功能免费。开启后可选：
+
+| 开关 | 免费功能 | 测试购买后的效果 |
+| --- | --- | --- |
+| `exports`（本轮优先测试） | 图片导入、编辑、回扫验证 | 下载 PNG、复制结果、分享图片 |
+| `adfree` | 所有编辑和导出功能 | 隐藏广告占位区 |
+
+两种模式都支持一次性买断和每月订阅，只配置一个 Price ID 时仅显示对应方案。金额和币种从 Stripe 服务端读取；没有固定正式售价。`adfree` **尚未加载 AdSense 脚本，也不会展示或产生真实广告收入**。
+
+### 本地沙盒联调
+
+1. 在目标 Stripe 账户的 **Sandbox / 测试模式** 中创建测试商品：一次性固定价格和每月固定价格。可先用 USD 5.00 买断、USD 1.00/月验证流程，这不是正式定价。价格不可为零、阶梯计价或按用量计价。
+2. 在该测试账户启用 [Customer Portal](https://dashboard.stripe.com/test/settings/billing/portal)，允许查看账单、更新支付方式及取消订阅。此实验不提供套餐切换、试用期、折扣或延迟支付方式。
+3. 运行 `npm run setup:billing`。它生成被 Git 忽略的 `.dev.vars` 和随机 Cookie 签名密钥，不会覆盖已有配置，也不会输出密钥。
+4. 仅在本地 `.dev.vars` 中填写 `STRIPE_SECRET_KEY=sk_test_…`、`STRIPE_PRICE_LIFETIME=price_…` 和/或 `STRIPE_PRICE_MONTHLY=price_…`。不要把密钥发到聊天、放在前端或提交到 Git。
+5. 启动：
+
+   ```bash
+   npm run build
+   npm run dev:billing
+   ```
+
+6. 打开 [本地支付测试](http://127.0.0.1:8788)。导入并修改二维码，点击下载应先弹出购买方案。选择方案会在新标签页打开 Stripe，原标签页图片不会丢失。
+7. 在 Stripe 结账页使用测试卡 `4242 4242 4242 4242`、未来有效期和任意三位 CVC，完成后回到原编辑标签页，点击“刷新购买状态”，再下载并回扫。可用 `4000 0000 0000 0002` 测试拒付。禁止在沙盒中使用真实银行卡。
+8. 分别验证取消结账、退款、订阅到期/取消、续费失败、浏览器刷新和 API 断网。将 `.dev.vars` 的 `BILLING_EXPERIMENT` 改为 `adfree` 并重启，验证免费导出及付费隐藏占位区。
+
+此版硬性拒绝 `sk_live_…` 及 Stripe 返回的 `livemode=true`。真实 Stripe Hosted Checkout 需要手动使用测试卡验证；自动化测试使用明确的 Stripe 替身，不会提交真实付款或伪装成真实沙盒验收。
+
+### 购买状态与账号决策
+
+服务端创建 Checkout 后立即写入签名、HttpOnly、SameSite Cookie，绑定匿名浏览器和该 Checkout。刷新购买状态、返回应用或再次导出时，服务端都会重新读取 Stripe 的付款、退款/争议、订阅期限和最新账单状态。无需等待成功跳转才记录 Checkout，关掉支付标签页后仍可在原浏览器查询。URL 参数和 `localStorage` 中的“已支付”不能授予权益；网络错误不会沿用旧的已付费状态。
+
+当前 Cookie 最长保留一年。更换浏览器、清除 Cookie、轮换签名密钥后不能恢复购买关系，因此“买断”目前只用于测试一次付款流程，**不是正式的永久授权**。只保留当前浏览器最近一笔结账；已解锁时阻止重复购买，待付款时复用原结账，未结束的订阅引导到 Portal 处理。
+
+这轮不加入账号或 Google 登录，避免在尚未确定收费方式前增加账户数据。正式收费前应增加稳定账号（邮箱登录即可，Google 登录可作为可选方式）、数据库中的 customer/订单/权益映射、带签名校验和幂等处理的 webhook，以及恢复购买流程。届时按 [Stripe fulfillment 指南](https://docs.stripe.com/checkout/fulfillment) 验证付款成功、续订、退款和取消事件。此版没有 webhook 或订单数据库，采用按需查询 Stripe 的沙盒方式，不执行后台自动发货、授权邮件或异步续费通知。
+
+纯浏览器处理和离线使用模式意味着收费入口可以被修改客户端绕过。正式商业模式可以考虑便利功能、持续服务或免广告，但本实验不提供不可绕过的图片处理授权。AdSense 正式接入还需要站点审核、发布商标识、隐私与必要的同意流程，遵守 [AdSense 计划政策](https://support.google.com/adsense/answer/48182?hl=zh-Hans)。
+
+### Pages 打包与配置补充
+
+以下是收费实验对前述“仅静态产物”说明的补充：`scripts/build.mjs` 还把 `server/billing.mjs` 打包为 `dist/_worker.js`，生成只匹配 `/api/*` 的 `_routes.json`。服务器代码、路由配置和公开静态资源一起作为已检查的 `dist/` artifact 发布；`.dev.vars`、示例、测试和文档均不上传。没有新增线上配置文件或在 CI 中配置 Stripe 密钥。
+
+`_deployment.json.files` 仍包含所有公开静态资源的 SHA-256；`server` 字段记录服务端源文件和路由摘要。Pages 不公开 `_worker.js` / `_routes.json`，所以线上验证通过 `/api/deployment` 检查其编入的提交号和源文件/路由摘要，而非下载服务端代码。`npm run test:pages` 会在真正的本地 Pages runtime 中加载同一构建产物并校验 API 与静态资源。CI 会在原有检查之外执行该命令。
+
+如要在线测试，在现有 Pages 项目的控制台中设置以下配置；先使用受控测试环境，确认后再发布。代码不会替你修改线上变量、域名、绑定或 Secret：
+
+| 配置 | 用途 |
+| --- | --- |
+| `BILLING_EXPERIMENT` | `off`、`exports` 或 `adfree` |
+| `BILLING_ORIGIN` | 实际访问的完整 origin，不带尾斜杠，例如 `https://qr-replace.pages.dev`；预览域名需要自己的配置 |
+| `STRIPE_SECRET_KEY`（Secret） | 目标账户的 `sk_test_…` |
+| `BILLING_COOKIE_SECRET`（Secret） | 独立随机的至少 32 字符密钥 |
+| `STRIPE_PRICE_LIFETIME` | 测试模式的一次性价格 ID，可省略 |
+| `STRIPE_PRICE_MONTHLY` | 测试模式的每月价格 ID，可省略；两种价格至少填一种 |
+
+使用 `npm run check`、`npm run build`、`npx --no-install playwright install chromium`、`npm run test:browser` 和 `npm run test:pages` 验证。支付测试涵盖两种收费模式、购买前后 PNG 回扫、付款状态、Cookie 篡改、CSRF、退款、订阅、Portal、网络失败与 `file://` 兼容。现有 GitHub Actions 的生产分支条件与部署凭据隔离保持不变。
