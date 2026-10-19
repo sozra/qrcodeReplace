@@ -244,3 +244,13 @@ npm run verify:deployment
 本地重新 `npm run build` 后请重启 `dev:billing`，因为打包会重建 dist 目录，旧运行进程不一定重新加载服务端文件。
 
 本轮实际沙盒联调已完成 USD 5 买断与 USD 1/月订阅，均由 Hosted Checkout 使用官方测试卡付款，Stripe 返回 `paid`，并生成对应 Invoice；本地事件重放后服务端返回 `paid: true`。买断解锁后实际下载 PNG，再重新导入识别，内容与预期替换内容一致。月订阅已通过 Portal 取消续订，Stripe 显示于 2026-11-19 终止；服务端确认本期仍 `paid: true` 且 `cancelAtPeriodEnd: true`，兼容 flexible billing 使用 `cancel_at` 表达期末取消的情况。自动回归另外覆盖退款、拒绝伪造通知、取消/到期、延迟付款和 PNG 下载回扫。公网 HTTPS Webhook 尚未部署与验收，本地 CLI WebSocket 连接超时的限制仍存在。
+
+### Pages 在线沙盒配置（2026-10-20）
+
+在上述本地联调之后，线上沙盒继续使用现有 `qr-replace` Pages 项目、`main` 生产分支和 `https://qr-replace.pages.dev`。另一个同名 Workers 项目不是本次发布目标。
+
+- Pages 生产环境在控制台配置 `BILLING_EXPERIMENT=exports`，Stripe 仍为 `acct_1USIMHDq6DeSheLU` 沙盒，沿用上表的测试商品、价格和 Portal。
+- D1 数据库 `qr-replace-billing-sandbox`（`e8c259f9-ebc0-4eb7-9ab8-5d8be8a0cea0`）绑定为 `BILLING_DB`，与本地数据库隔离。
+- 公网 Webhook 为 `https://qr-replace.pages.dev/api/billing/webhook`，端点 ID `we_1USJ7kDq6DeSheLU43bS1SiD`，事件 API 版本 `2026-09-30.endive`。仅接收本沙盒的 Checkout、订阅、账单、退款和争议事件。
+- Stripe API 密钥、公网 Webhook 签名密钥和独立的 Cookie 签名密钥在 Pages 控制台以 Secret 保存；公网签名密钥与本地 CLI 的密钥不同，不进入 Git 或构建产物。
+- 线上直接接收 Stripe HTTPS 通知，不运行本地 `sync:stripe` 重放脚本。部署后需用线上应用创建新测试订单，验证真实通知投递、付款解锁和 PNG 下载回扫；本地购买 Cookie 不迁移到线上。
