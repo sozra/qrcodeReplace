@@ -5,14 +5,20 @@
 
 // ---------------------------------------------------------------- state
 
+const savedPreferences = QRPreferences.load();
+let preferences = savedPreferences.value;
 const state = {
   img: null,          // HTMLImageElement 原图
   srcCanvas: null,    // 原图自然尺寸画布（用于取色/导出底图）
   srcName: null,      // 导入文件的原名（用于导出命名）
   detections: [],     // { id, data, version, loc:{tl,tr,br,bl}, enabled }
-  text: "你还真扫啊",
-  ec: "M",
-  matchVersion: true,
+  text: preferences.text,
+  ec: preferences.ec,
+  matchVersion: preferences.matchVersion,
+  allowUpgrade: preferences.allowUpgrade,
+  defaultMode: preferences.defaultMode,
+  masks: [],
+  selectedMaskId: null,
   reboxFor: null,     // 正在框选取票号区域的 detection
   selectedId: null,
   tool: "select",
@@ -30,9 +36,6 @@ const PRESETS = [
   "扫码结果：一个神秘的微笑 :)",
   "恭喜你浪费了 3 秒钟",
 ];
-
-const MAX_DETECTIONS = 8;
-const DETECT_MAX_DIM = 1600;
 
 // ---------------------------------------------------------------- dom
 
@@ -58,6 +61,9 @@ let dragInfo = null;
 let viewRaf = 0;
 let pendingExport = null;
 let importSequence = 0;
+let scanRun = null;
+let initialEdit = null;
+let renderErrors = [];
 const pointers = new Map();
 const clampNum = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
 
@@ -232,47 +238,67 @@ function homographyToQuad(q) {
 
 // ---------------------------------------------------------------- detection
 
-function runDetection() {
-  const w = state.srcCanvas.width, h = state.srcCanvas.height;
-  const scale = Math.min(1, DETECT_MAX_DIM / Math.max(w, h));
-  const dw = Math.round(w * scale), dh = Math.round(h * scale);
-
-  const det = document.createElement("canvas");
-  det.width = dw; det.height = dh;
-  const dctx = det.getContext("2d", { willReadFrequently: true });
-  dctx.drawImage(state.srcCanvas, 0, 0, dw, dh);
-
-  const found = [];
-  for (let iter = 0; iter < MAX_DETECTIONS; iter++) {
-    const imgData = dctx.getImageData(0, 0, dw, dh);
-    const res = jsQR(imgData.data, dw, dh, { inversionAttempts: "attemptBoth" });
-    if (!res) break;
-    const inv = 1 / scale;
-    const loc = {
-      tl: { x: res.location.topLeftCorner.x * inv, y: res.location.topLeftCorner.y * inv },
-      tr: { x: res.location.topRightCorner.x * inv, y: res.location.topRightCorner.y * inv },
-      br: { x: res.location.bottomRightCorner.x * inv, y: res.location.bottomRightCorner.y * inv },
-      bl: { x: res.location.bottomLeftCorner.x * inv, y: res.location.bottomLeftCorner.y * inv },
-    };
-    found.push({
-      id: found.length + 1,
-      data: res.data,
-      version: res.version || 0,
-      loc,
-      enabled: true,
+function initializeDetection(det, id) {
+  det.id = id; det.enabled = true; det.mode = state.defaultMode; det.text = state.text;
+  det.foot = measureFootprint(det); suggestNumberRegion(det);
+  return det;
+}
+function sameRegion(a, b) {
+  const center = quadCenter(a), other = quadCenter(b);
+  return pointInQuad(center.x, center.y, expandQuad(b, 1.15)) && pointInQuad(other.x, other.y, expandQuad(a, 1.15));
+}
+function stopScan() {
+  if (!scanRun) return;
+  scanRun.controller.abort(); scanRun = null;
+  $("scanStatus").textContent = "识别已取消，已有编辑已保留；可重扫或手动框选";
+  updateScanControls();
+}
+function updateScanControls() {
+  btnRescan.disabled = !state.img || !!scanRun;
+  $("btnCancelScan").classList.toggle("hidden", !scanRun);
+  $("btnResetEdits").disabled = !state.img || !initialEdit || !!scanRun;
+  updateExportControls();
+}
+async function runDetection({ initial = false } = {}) {
+  if (!state.srcCanvas) return;
+  stopScan(); commitHistory(); invalidateValidation();
+  const run = { controller: new AbortController(), source: state.srcCanvas, revision };
+  scanRun = run; updateScanControls(); $("scanStatus").textContent = "正在识别二维码…";
+  try {
+    const found = await QRDetection.detectCanvas(run.source, {
+      signal: run.controller.signal, maxDetections: 32,
+      onProgress: p => { if (scanRun === run) $("scanStatus").textContent = p.message || `正在识别 ${p.completed} / ${p.total}，已找到 ${p.found || 0} 个`; },
     });
-    // 在检测画布上抹掉该码，继续找下一个
-    const n = 17 + 4 * (res.version || 4);
-    dctx.fillStyle = "#fff";
-    pathQuad(dctx, expandQuad({
-      tl: res.location.topLeftCorner, tr: res.location.topRightCorner,
-      br: res.location.bottomRightCorner, bl: res.location.bottomLeftCorner,
-    }, (n + 12) / n));
-    dctx.fill();
+    while (dragInfo && scanRun === run) await new Promise(resolve => setTimeout(resolve, 16));
+    if (scanRun !== run || state.srcCanvas !== run.source) return;
+    // 用户在识别期间仍可编辑；只合并新目标，不覆写已有文字、模式或手动位置。
+    const old = state.detections;
+    let nextId = Math.max(0, ...old.map(d => d.id)) + 1;
+    const merged = [...old];
+    const defaults = [];
+    for (const raw of found) {
+      const fresh = initializeDetection(raw, nextId);
+      defaults.push(JSON.parse(JSON.stringify(fresh)));
+      const match = merged.find(d => sameRegion(d.loc, fresh.loc));
+      if (!match) { nextId++; merged.push(fresh); }
+    }
+    state.detections = merged;
+    if (!state.selectedId && !state.selectedMaskId) state.selectedId = merged[0]?.id ?? null;
+    if (initial) {
+      initialEdit = { text: state.text, ec: state.ec, matchVersion: state.matchVersion, allowUpgrade: state.allowUpgrade, defaultMode: state.defaultMode,
+        detections: defaults.map((d, index) => ({ ...d, id: index + 1 })), masks: [] };
+    }
+    const noInterveningEdits = initial && revision === run.revision;
+    invalidateValidation(); renderView(); renderDetList();
+    if (noInterveningEdits) editorHistory.reset(captureEdit()); else commitHistory();
+    updateHistoryControls();
+    $("scanStatus").textContent = found.length >= 32 ? "已达到 32 个自动识别目标上限，可手动补充" : `识别完成：找到 ${found.length} 个二维码${initial ? "" : "，已有编辑已保留"}`;
+    if (!merged.length) toast("未检测到二维码，可手动框选或添加遮盖区域");
+  } catch (error) {
+    if (scanRun === run && error.name !== "AbortError") $("scanStatus").textContent = `识别失败：${error.message || error}。可手动框选继续编辑。`;
+  } finally {
+    if (scanRun === run) { scanRun = null; updateScanControls(); }
   }
-  for (const det of found) det.foot = measureFootprint(det);
-  state.detections = found;
-  for (const det of found) suggestNumberRegion(det);
 }
 
 // ---------------------------------------------------------------- 取票号定位
@@ -538,67 +564,82 @@ function drawNumberRegion(ctx, det) {
 }
 
 const qrCache = new Map();
-function buildQR(version) {
-  if (!state.text) throw new Error("请输入替换内容；清空文本不会遮盖原码。");
-  const key = JSON.stringify([state.text, state.ec, state.matchVersion ? version : 0]);
+function buildQR(version, text = state.text) {
+  if (!text) throw new Error("请输入替换内容，或明确选择「遮盖」或「保留」。");
+  const key = JSON.stringify([text, state.ec, state.matchVersion ? version : 0, state.allowUpgrade]);
   if (qrCache.has(key)) return qrCache.get(key);
-  const make = (v) => { const qr = qrcode(v, state.ec); qr.addData(state.text); qr.make(); return qr; };
+  const make = v => { const qr = qrcode(v, state.ec); qr.addData(text); qr.make(); return qr; };
   let qr;
   if (state.matchVersion && version >= 1 && version <= 40) {
-    try { qr = make(version); } catch (_) { /* 容量不足时自动升级，并在卡片显示实际版本。 */ }
+    try { qr = make(version); }
+    catch (_) {
+      if (!state.allowUpgrade) throw new Error(`原码 v${version} 容量不足，请缩短内容，或在高级设置中允许升级密度。`);
+    }
   }
   try { if (!qr) qr = make(0); }
-  catch (_) { throw new Error("替换内容超出二维码容量，请缩短内容或降低容错等级。"); }
-  if (qrCache.size >= 24) qrCache.delete(qrCache.keys().next().value);
-  qrCache.set(key, qr);
-  return qr;
+  catch (_) { throw new Error("内容超出二维码容量，请缩短内容或降低容错等级。"); }
+  if (qrCache.size >= 32) qrCache.delete(qrCache.keys().next().value);
+  qrCache.set(key, qr); return qr;
 }
-
 function updateExportControls() {
-  const disabled = !state.img || !!renderError || !!validationRun || !!dragInfo;
-  btnDownload.disabled = disabled;
-  btnCopy.disabled = disabled;
-  $("btnVerify").disabled = disabled;
-  $("renderError").textContent = renderError;
-  $("renderError").classList.toggle("hidden", !renderError);
+  const disabled = !state.img || !!renderError || !!validationRun || !!dragInfo || !!scanRun;
+  btnDownload.disabled = disabled; btnCopy.disabled = disabled; $("btnVerify").disabled = disabled;
+  $("btnShare").disabled = disabled;
+  $("renderError").textContent = renderError; $("renderError").classList.toggle("hidden", !renderError);
+  $("editorError").textContent = renderErrors.find(e => e.id === state.selectedId)?.message || "";
+  $("editorError").classList.toggle("hidden", !$("editorError").textContent);
 }
-
+function maskFill(mask) {
+  if (!mask.auto) return mask.color;
+  const r = mask.rect, ctx = state.srcCanvas.getContext("2d", { willReadFrequently: true });
+  const samples = [];
+  for (let i = 0; i <= 4; i++) {
+    const x = r.x + r.w * i / 4, y = r.y + r.h * i / 4;
+    samples.push(samplePx(ctx, state.srcCanvas.width, state.srcCanvas.height, x, r.y - 2));
+    samples.push(samplePx(ctx, state.srcCanvas.width, state.srcCanvas.height, x, r.y + r.h + 2));
+    samples.push(samplePx(ctx, state.srcCanvas.width, state.srcCanvas.height, r.x - 2, y));
+    samples.push(samplePx(ctx, state.srcCanvas.width, state.srcCanvas.height, r.x + r.w + 2, y));
+  }
+  const channels = [0, 1, 2].map(c => samples.map(p => p[c]).sort((a, b) => a - b)[Math.floor(samples.length / 2)]);
+  return `rgb(${channels.join(",")})`;
+}
 function renderResult() {
   if (!state.img) return false;
   const w = state.srcCanvas.width, h = state.srcCanvas.height;
   if (resultCanvas.width !== w || resultCanvas.height !== h) { resultCanvas.width = w; resultCanvas.height = h; }
-  const ctx = resultCanvas.getContext("2d");
-  ctx.clearRect(0, 0, w, h);
-  ctx.drawImage(state.srcCanvas, 0, 0);
-  renderError = "";
-  try {
-    // 先验证所有生成参数，避免部分替换或旧预览被当作有效结果。
-    const codes = state.detections.filter(d => d.enabled).map(det => ({ det, qr: buildQR(det.version) }));
+  const ctx = resultCanvas.getContext("2d"); ctx.clearRect(0, 0, w, h); ctx.drawImage(state.srcCanvas, 0, 0);
+  renderError = ""; renderErrors = [];
+  const codes = [];
+  for (const det of state.detections) {
+    det.generatedVersion = null;
+    if (!det.enabled || det.mode !== "replace") continue;
+    try { codes.push({ det, qr: buildQR(det.version, det.text) }); }
+    catch (error) { renderErrors.push({ id: det.id, message: `#${det.id}：${error.message}` }); }
+  }
+  if (renderErrors.length) renderError = renderErrors.map(e => e.message).join("\n");
+  else try {
+    for (const det of state.detections) {
+      if (det.enabled && det.mode === "cover") { ctx.fillStyle = det.foot.bg; pathQuad(ctx, det.foot.quad); ctx.fill(); }
+    }
     for (const { det, qr } of codes) {
-      const m = qr.getModuleCount();
-      det.generatedVersion = (m - 17) / 4;
-      ctx.fillStyle = det.foot.bg;
-      pathQuad(ctx, det.foot.quad);
-      ctx.fill();
-      const map = homographyToQuad(det.loc);
-      ctx.fillStyle = "#000000";
+      const m = qr.getModuleCount(); det.generatedVersion = (m - 17) / 4;
+      ctx.fillStyle = det.foot.bg; pathQuad(ctx, det.foot.quad); ctx.fill();
+      const map = homographyToQuad(det.loc); ctx.fillStyle = "#000000";
       for (let r = 0; r < m; r++) for (let c = 0; c < m; c++) {
         if (!qr.isDark(r, c)) continue;
-        const p = [map(c / m, r / m), map((c + 1) / m, r / m), map((c + 1) / m, (r + 1) / m), map(c / m, (r + 1) / m)];
-        pathQuad(ctx, { tl: p[0], tr: p[1], br: p[2], bl: p[3] });
-        ctx.fill();
+        pathQuad(ctx, { tl: map(c / m, r / m), tr: map((c + 1) / m, r / m), br: map((c + 1) / m, (r + 1) / m), bl: map(c / m, (r + 1) / m) }); ctx.fill();
       }
     }
-    for (const det of state.detections) {
-      if (det.numMode !== "off" && det.numRegion) drawNumberRegion(ctx, det);
+    for (const det of state.detections) if (det.enabled && det.numMode !== "off" && det.numRegion) drawNumberRegion(ctx, det);
+    for (const mask of state.masks) if (mask.enabled) {
+      const r = mask.rect; ctx.fillStyle = maskFill(mask);
+      ctx.fillRect(Math.floor(r.x), Math.floor(r.y), Math.ceil(r.x + r.w) - Math.floor(r.x), Math.ceil(r.y + r.h) - Math.floor(r.y));
     }
   } catch (e) {
-    renderError = e.message || "无法生成替换结果，请调整内容后重试。";
-    ctx.clearRect(0, 0, w, h);
-    ctx.drawImage(state.srcCanvas, 0, 0);
+    renderError = e.message || "无法生成结果，请调整后重试。";
+    ctx.clearRect(0, 0, w, h); ctx.drawImage(state.srcCanvas, 0, 0);
   }
-  updateExportControls();
-  return !renderError;
+  updateExportControls(); return !renderError;
 }
 
 function renderView(rebuild = true) {
@@ -632,7 +673,7 @@ function renderView(rebuild = true) {
     }
   }
   for (const det of state.detections) {
-    if (det.numMode === "off" || !det.numRegion) continue;
+    if (!det.enabled || det.numMode === "off" || !det.numRegion) continue;
     const r = det.numRegion;
     ctx.strokeStyle = "#4cc2ff";
     ctx.setLineDash([5 * unit, 4 * unit]); ctx.strokeRect(r.x, r.y, r.w, r.h); ctx.setLineDash([]);
@@ -641,7 +682,18 @@ function renderView(rebuild = true) {
       ctx.fillRect(x - 4 * unit, y - 4 * unit, 8 * unit, 8 * unit);
     }
   }
-  if (dragInfo?.kind === "drawQR") {
+  for (const mask of state.masks) {
+    const r = mask.rect, selected = mask.id === state.selectedMaskId;
+    ctx.strokeStyle = mask.enabled ? "#c6a1ff" : "#8b919c";
+    ctx.setLineDash(mask.enabled ? [] : [5 * unit, 4 * unit]);
+    ctx.strokeRect(r.x, r.y, r.w, r.h); ctx.setLineDash([]);
+    ctx.fillStyle = "#c6a1ff"; ctx.textAlign = "left";
+    ctx.fillText(`遮盖 ${mask.id}`, r.x + 6 * unit, Math.max(12 * unit, r.y - 10 * unit)); ctx.textAlign = "center";
+    if (selected && state.tool === "select") for (const [x, y] of [[r.x, r.y], [r.x+r.w, r.y], [r.x+r.w,r.y+r.h], [r.x,r.y+r.h]]) {
+      ctx.fillRect(x - 6 * unit, y - 6 * unit, 12 * unit, 12 * unit);
+    }
+  }
+  if (["drawQR", "drawMask"].includes(dragInfo?.kind)) {
     const r = dragInfo.rect;
     if (r) { ctx.strokeStyle = "#4cc2ff"; ctx.setLineDash([5 * unit, 3 * unit]); ctx.strokeRect(r.x, r.y, r.w, r.h); ctx.setLineDash([]); }
   }
@@ -649,9 +701,10 @@ function renderView(rebuild = true) {
 
 function captureEdit() {
   return {
-    text: state.text, ec: state.ec, matchVersion: state.matchVersion,
-    detections: state.detections.map(({ id, data, version, loc, enabled, manual, numMode, numRegion, numDigits }) =>
-      ({ id, data, version, loc, enabled, manual: !!manual, numMode: numMode || "off", numRegion: numRegion || null, numDigits: numDigits || null })),
+    text: state.text, ec: state.ec, matchVersion: state.matchVersion, allowUpgrade: state.allowUpgrade, defaultMode: state.defaultMode,
+    masks: state.masks.map(m => ({ id: m.id, rect: m.rect, color: m.color, auto: m.auto, enabled: m.enabled })),
+    detections: state.detections.map(({ id, data, version, loc, enabled, manual, numMode, numRegion, numDigits, text, mode }) =>
+      ({ id, data, version, loc, enabled, text, mode, manual: !!manual, numMode: numMode || "off", numRegion: numRegion || null, numDigits: numDigits || null })),
   };
 }
 function updateHistoryControls() {
@@ -665,11 +718,13 @@ function commitHistory() {
 }
 function restoreEdit(snapshot) {
   if (!snapshot) return;
-  state.text = snapshot.text; state.ec = snapshot.ec; state.matchVersion = snapshot.matchVersion;
+  state.text = snapshot.text; state.ec = snapshot.ec; state.matchVersion = snapshot.matchVersion; state.allowUpgrade = !!snapshot.allowUpgrade; state.defaultMode = snapshot.defaultMode || "replace";
+  state.masks = snapshot.masks || [];
+  if (!state.masks.some(m => m.id === state.selectedMaskId)) state.selectedMaskId = null;
   state.detections = snapshot.detections;
   for (const det of state.detections) { det.foot = measureFootprint(det); det._numAn = null; }
-  if (!state.detections.some(d => d.id === state.selectedId)) state.selectedId = state.detections[0]?.id ?? null;
-  inpText.value = state.text; chkMatch.checked = state.matchVersion;
+  if (!state.detections.some(d => d.id === state.selectedId)) state.selectedId = state.selectedMaskId ? null : state.detections[0]?.id ?? null;
+  chkMatch.checked = state.matchVersion; $("chkAllowUpgrade").checked = state.allowUpgrade;
   segEc.querySelectorAll("button").forEach(b => { b.classList.toggle("on", b.dataset.ec === state.ec); b.setAttribute("aria-pressed", String(b.dataset.ec === state.ec)); });
   invalidateValidation(); renderView(); renderDetList(); updateHistoryControls();
 }
@@ -687,55 +742,141 @@ function undoEdit(redo = false) {
   restoreEdit(redo ? editorHistory.redo() : editorHistory.undo());
 }
 
+function selectedDetection() { return state.detections.find(d => d.id === state.selectedId); }
+function selectedMask() { return state.masks.find(m => m.id === state.selectedMaskId); }
+function updateEditor() {
+  const det = selectedDetection(), mask = selectedMask();
+  $("qrEditor").classList.toggle("hidden", !!mask); $("maskEditor").classList.toggle("hidden", !mask);
+  $("selectionLabel").textContent = mask ? `遮盖 ${mask.id}` : det ? `二维码 #${det.id}` : "新目标的默认内容";
+  $("selectionHelp").textContent = mask ? (mask.enabled ? "拖动紫色区域或四角调整范围；填充为不透明色块。" : "此遮盖已停用，可在上方开关重新启用。") : det ? (det.enabled ? "只编辑当前二维码。要统一内容，请使用下方应用到全部按钮。" : "此组已停用，二维码和取票号都保留原样。") : (state.img ? "选择上方目标，或使用工具栏添加二维码 / 遮盖区域。" : "先导入图片；也可以提前设置新二维码的默认内容。");
+  const mode = det?.mode || state.defaultMode, value = det ? det.text : state.text;
+  if (inpText.value !== value) inpText.value = value;
+  inpText.disabled = !!det && (!det.enabled || mode !== "replace");
+  $("textLabel").textContent = det ? `#${det.id} 的替换内容` : "新目标默认替换内容";
+  $("segMode").querySelectorAll("button").forEach(btn => {
+    btn.classList.toggle("on", btn.dataset.mode === mode); btn.setAttribute("aria-pressed", String(btn.dataset.mode === mode));
+    btn.disabled = !!det && !det.enabled;
+  });
+  document.querySelectorAll("#presets .chip, #customPresets .chip").forEach(button => { button.disabled = !!det && !det.enabled; });
+  $("btnApplyAll").disabled = !state.img || !det || !det.enabled || det.mode !== "replace" || !det.text;
+  $("btnAddMaskPanel").disabled = !state.img;
+  if (mask) { $("inpMaskColor").value = mask.color; $("chkMaskAuto").checked = mask.auto; $("inpMaskColor").disabled = mask.auto; }
+  chkMatch.checked = state.matchVersion; $("chkAllowUpgrade").checked = state.allowUpgrade;
+  $("chkAllowUpgrade").disabled = !state.matchVersion;
+  segEc.querySelectorAll("button").forEach(btn => { btn.classList.toggle("on", btn.dataset.ec === state.ec); btn.setAttribute("aria-pressed", String(btn.dataset.ec === state.ec)); });
+  updateExportControls();
+}
 function renderDetList() {
   detsBox.querySelectorAll(".det").forEach(el => el.remove());
-  detsEmpty.textContent = state.img ? "未检测到二维码，可用「手动框选」添加" : "尚未载入图片";
+  detsEmpty.textContent = state.img ? "尚未找到二维码，可手动框选；也可直接添加遮盖区域" : "尚未载入图片";
   detsEmpty.classList.toggle("hidden", state.detections.length > 0);
   for (const det of state.detections) {
-    const el = document.createElement("div");
-    el.className = "det" + (det.enabled ? "" : " off") + (det.id === state.selectedId ? " selected" : "");
-    el.dataset.id = det.id;
+    const el = document.createElement("div"); el.className = "det" + (det.enabled ? "" : " off") + (det.id === state.selectedId ? " selected" : ""); el.dataset.id = det.id;
     const desc = det.data || "手动区域 · 未识别原码";
     const original = det.version ? `原码 v${det.version}` : "原码版本未知";
-    const generated = det.enabled && det.generatedVersion && !renderError ? ` → 新码 v${det.generatedVersion}` : "";
-    el.innerHTML = `<div class="det-main"><div class="det-badge">${det.id}</div><div class="det-body"><div class="det-data" title="${escapeHtml(desc)}">${escapeHtml(desc)}</div><div class="det-meta">${original}${generated}${det.manual ? " · 手动" : ""}</div></div></div>
-      <div class="det-actions"><button class="btn mini ghost" data-act="select">调整四角</button><button class="btn mini ghost" data-act="toggle" aria-pressed="${det.enabled}">${det.enabled ? "停用替换" : "启用替换"}</button><button class="btn mini ghost" data-act="delete">移除</button></div>`;
-    el.addEventListener("click", e => {
-      const action = e.target.closest("button[data-act]")?.dataset.act;
-      cancelInteraction(); commitHistory();
-      if (action === "toggle") { det.enabled = !det.enabled; editChanged(); }
-      else if (action === "delete") { state.detections = state.detections.filter(d => d.id !== det.id); if (state.selectedId === det.id) state.selectedId = null; editChanged(); }
-      else selectDetection(det.id);
+    const generated = det.enabled && det.mode === "replace" && det.generatedVersion && !renderError ? ` → 新码 v${det.generatedVersion}` : "";
+    const modeLabel = { replace: "替换", cover: "遮盖", keep: "保留原码" }[det.mode];
+    el.innerHTML = `<div class="target-summary"><button class="det-main" aria-label="选中二维码 ${det.id}" aria-pressed="${det.id === state.selectedId}"><span class="det-badge">${det.id}</span><span class="det-body"><span class="det-data" title="${escapeHtml(desc)}">${escapeHtml(desc)}</span><span class="det-meta">${original}${generated}${det.manual ? " · 手动" : ""}</span><span class="det-meta">${det.enabled ? modeLabel : "整组已停用"}${det.enabled && det.mode === "replace" ? ` · ${escapeHtml(det.text || "内容为空")}` : ""}</span></span></button><label class="target-toggle" title="控制此二维码及取票号的所有修改"><input type="checkbox" ${det.enabled ? "checked" : ""} aria-label="启用二维码 ${det.id} 整组修改"><span>${det.enabled ? "启用" : "停用"}</span></label></div><div class="det-actions"><button class="btn mini ghost" data-act="select">调整四角</button><button class="btn mini subtle" data-act="delete">移除</button></div>`;
+    el.querySelector(".det-main").addEventListener("click", () => { cancelInteraction(); commitHistory(); selectDetection(det.id); });
+    el.querySelector(".target-toggle input").addEventListener("change", e => { const enabled = e.target.checked; cancelInteraction(); commitHistory(); det.enabled = enabled; editChanged(); });
+    el.querySelector('[data-act="select"]').addEventListener("click", () => { cancelInteraction(); commitHistory(); selectDetection(det.id); revealCanvas(); });
+    el.querySelector('[data-act="delete"]').addEventListener("click", () => {
+      cancelInteraction(); commitHistory(); state.detections = state.detections.filter(d => d.id !== det.id);
+      if (state.selectedId === det.id) state.selectedId = state.detections[0]?.id ?? null; editChanged();
     });
+    const err = renderErrors.find(e => e.id === det.id);
+    if (err || (det.generatedVersion > det.version && det.version && state.matchVersion && state.allowUpgrade)) {
+      const note = document.createElement("div"); note.className = "det-warning";
+      note.textContent = err ? err.message : `已允许从 v${det.version} 升到 v${det.generatedVersion}，网格密度增加`; el.appendChild(note);
+    }
     if (NUM_RE.test(det.data.trim())) {
       const row = document.createElement("div"); row.className = "det-num";
-      row.innerHTML = `<span class="det-num-label">取票号</span><div class="seg seg-tiny">${[["off", "关"], ["cover", "遮盖"], ["replace", "换号"]].map(([m, label]) => `<button data-m="${m}" class="${det.numMode === m ? "on" : ""}" aria-pressed="${det.numMode === m}">${label}</button>`).join("")}</div><button class="btn mini ghost" data-act="rebox">框选</button>${det.numMode === "replace" ? '<button class="btn mini ghost" data-act="reshuffle">换一注</button>' : ""}`;
+      row.innerHTML = `<span class="det-num-label">取票号</span><div class="seg seg-tiny">${[["off", "关"], ["cover", "遮盖"], ["replace", "换号"]].map(([m, label]) => `<button data-m="${m}" class="${det.numMode === m ? "on" : ""}" aria-pressed="${det.numMode === m}" ${det.enabled ? "" : "disabled"}>${label}</button>`).join("")}</div><button class="btn mini ghost" data-act="rebox" ${det.enabled ? "" : "disabled"}>框选</button>${det.numMode === "replace" ? `<button class="btn mini ghost" data-act="reshuffle" ${det.enabled ? "" : "disabled"}>换一注</button>` : ""}`;
       row.addEventListener("click", e => {
-        e.stopPropagation(); const btn = e.target.closest("button"); if (!btn) return;
-        cancelInteraction(); commitHistory();
+        const btn = e.target.closest("button"); if (!btn || !det.enabled) return;
+        cancelInteraction(); commitHistory(); state.selectedId = det.id; state.selectedMaskId = null;
         if (btn.dataset.m) {
           const mode = btn.dataset.m;
           if (mode !== "off" && !det.numRegion) { state.reboxFor = { id: det.id, mode }; setTool("number"); }
           else { det.numMode = mode; editChanged(); }
         } else if (btn.dataset.act === "rebox") { state.reboxFor = { id: det.id, mode: det.numMode === "off" ? "replace" : det.numMode }; setTool("number"); }
         else { det.numDigits = null; editChanged(); }
-      });
-      el.appendChild(row);
+        updateEditor();
+      }); el.appendChild(row);
     }
     detsBox.appendChild(el);
   }
+  const masksBox = $("masks"); masksBox.replaceChildren();
+  for (const mask of state.masks) {
+    const el = document.createElement("div"); el.className = "mask-card" + (mask.id === state.selectedMaskId ? " selected" : "") + (mask.enabled ? "" : " off"); el.dataset.maskId = mask.id;
+    el.innerHTML = `<div class="target-summary"><button class="det-main" aria-label="选中遮盖 ${mask.id}" aria-pressed="${mask.id === state.selectedMaskId}"><span class="det-badge">遮</span><span class="det-body"><span class="det-data">遮盖 ${mask.id}</span><span class="det-meta">${Math.round(mask.rect.w)} × ${Math.round(mask.rect.h)} · ${mask.auto ? "自动底色" : mask.color}</span></span></button><label class="target-toggle"><input type="checkbox" ${mask.enabled ? "checked" : ""} aria-label="启用遮盖 ${mask.id}"><span>${mask.enabled ? "启用" : "停用"}</span></label></div>`;
+    el.querySelector("button").addEventListener("click", () => { cancelInteraction(); commitHistory(); selectMask(mask.id); });
+    el.querySelector("input").addEventListener("change", e => { const enabled = e.target.checked; cancelInteraction(); commitHistory(); mask.enabled = enabled; editChanged(); });
+    masksBox.appendChild(el);
+  }
+  updateEditor();
 }
 function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
-function selectDetection(id) {
-  state.selectedId = id; setTool("select"); state.comparing = false;
-  const det = state.detections.find(d => d.id === id);
-  if (det) {
-    const c = quadCenter(det.loc);
-    camera.x = viewport.clientWidth / 2 - c.x * camera.scale;
-    camera.y = viewport.clientHeight / 2 - c.y * camera.scale;
-    applyViewTransform();
+function selectDetection(id, center = true) {
+  state.selectedId = id; state.selectedMaskId = null; setTool("select"); state.comparing = false;
+  const det = selectedDetection();
+  if (det && center) {
+    const points = Object.values(det.loc);
+    focusArea({ x: Math.min(...points.map(p => p.x)), y: Math.min(...points.map(p => p.y)),
+      w: Math.max(...points.map(p => p.x)) - Math.min(...points.map(p => p.x)),
+      h: Math.max(...points.map(p => p.y)) - Math.min(...points.map(p => p.y)) });
   }
   renderView(false); renderDetList(); updateToolControls();
+}
+function selectMask(id, center = true) {
+  state.selectedId = null; state.selectedMaskId = id; setTool("select");
+  const r = selectedMask()?.rect;
+  if (r && center) focusArea(r);
+  renderView(false); renderDetList();
+}
+function focusPoint(p) {
+  camera.x = viewport.clientWidth / 2 - p.x * camera.scale; camera.y = viewport.clientHeight / 2 - p.y * camera.scale; applyViewTransform();
+}
+function focusArea(r) {
+  camera.scale = clampNum(Math.min(viewport.clientWidth * 0.68 / Math.max(1, r.w), viewport.clientHeight * 0.68 / Math.max(1, r.h)), camera.fit, 8);
+  focusPoint({ x: r.x + r.w / 2, y: r.y + r.h / 2 });
+}
+function revealCanvas() {
+  if (matchMedia("(max-width: 860px)").matches && stage.getBoundingClientRect().top < 0) stage.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+function addMask(rect) {
+  if (!rect || rect.w < 8 || rect.h < 8) { toast("遮盖范围太小，请重新框选"); return; }
+  const mask = { id: Math.max(0, ...state.masks.map(m => m.id)) + 1, rect, enabled: true, color: preferences.maskColor, auto: preferences.maskAuto };
+  state.masks.push(mask); state.selectedMaskId = mask.id; state.selectedId = null;
+  toast("已添加遮盖区域，可拖动或调整四角");
+}
+function storePreferences(message = "偏好已保存在此浏览器") {
+  const saved = QRPreferences.save(preferences); preferences = saved.value;
+  $("storageStatus").textContent = saved.ok ? message : `${saved.error} 本次编辑仍可继续。`;
+  return saved.ok;
+}
+function rememberRendering() {
+  preferences.ec = state.ec; preferences.matchVersion = state.matchVersion; preferences.allowUpgrade = state.allowUpgrade; storePreferences();
+}
+function applyText(value) {
+  cancelInteraction(); commitHistory();
+  const det = selectedDetection(); if (det && !det.enabled) return; if (det) { det.text = value; det.mode = "replace"; }
+  else state.text = value;
+  editChanged();
+}
+function renderPresets() {
+  presetsBox.replaceChildren(); $("customPresets").replaceChildren();
+  for (const p of PRESETS) {
+    const chip = document.createElement("button"); chip.className = "chip"; chip.textContent = p; chip.title = p;
+    chip.addEventListener("click", () => applyText(p)); presetsBox.appendChild(chip);
+  }
+  for (const preset of preferences.presets) {
+    const row = document.createElement("span"); row.className = "custom-preset";
+    const use = document.createElement("button"); use.className = "chip"; use.textContent = preset.name; use.title = preset.text; use.addEventListener("click", () => applyText(preset.text));
+    const remove = document.createElement("button"); remove.className = "preset-delete"; remove.textContent = "×"; remove.setAttribute("aria-label", `删除预设 ${preset.name}`);
+    remove.addEventListener("click", () => { preferences.presets = preferences.presets.filter(p => p.id !== preset.id); storePreferences("预设已删除"); renderPresets(); });
+    row.append(use, remove); $("customPresets").appendChild(row);
+  }
 }
 
 function applyViewTransform() {
@@ -761,17 +902,18 @@ function zoomAt(factor, x = viewport.clientWidth / 2, y = viewport.clientHeight 
   applyViewTransform(); scheduleRenderView(false);
 }
 function updateToolControls() {
-  for (const [id, active] of [["btnAddQr", state.tool === "drawQR"], ["btnPan", state.tool === "pan"], ["btnCompare", state.comparing]]) {
+  for (const [id, active] of [["btnAddQr", state.tool === "drawQR"], ["btnAddMask", state.tool === "drawMask"], ["btnPan", state.tool === "pan"], ["btnCompare", state.comparing]]) {
     $(id).classList.toggle("active", active); $(id).setAttribute("aria-pressed", String(active));
   }
   $("btnCompare").textContent = state.comparing ? "返回结果" : "原图对比";
-  $("btnCancelEdit").classList.toggle("hidden", !["drawQR", "number"].includes(state.tool));
-  $("editorHintText").textContent = state.comparing ? "正在查看原图，导出仍使用替换结果" : state.tool === "drawQR" ? "拖动框选二维码码区；先局部识别，识别失败时可调整四角。Esc 取消" : state.tool === "number" ? "拖动框选取票号区域 · Esc 取消" : state.tool === "pan" ? "拖动平移 · 滚轮或双指缩放" : "点选二维码后拖动四角 · 拖动空白处平移 · 滚轮 / 双指缩放";
-  viewport.style.cursor = state.comparing || state.tool === "pan" ? "grab" : state.tool === "drawQR" || state.tool === "number" ? "crosshair" : "default";
+  $("btnCancelEdit").classList.toggle("hidden", !["drawQR", "drawMask", "number"].includes(state.tool));
+  $("editorHintText").textContent = state.comparing ? "正在查看原图，导出仍使用替换结果" : state.tool === "drawQR" ? "拖动框选二维码码区；先局部识别，识别失败时可调整四角。Esc 取消" : state.tool === "drawMask" ? "拖动框选需要遮盖的区域 · Esc 取消" : state.tool === "number" ? "拖动框选取票号区域 · Esc 取消" : state.tool === "pan" ? "拖动平移 · 滚轮或双指缩放" : "点选二维码后拖动四角 · 拖动空白处平移 · 滚轮 / 双指缩放";
+  viewport.style.cursor = state.comparing || state.tool === "pan" ? "grab" : ["drawQR", "drawMask", "number"].includes(state.tool) ? "crosshair" : "default";
 }
 function setTool(tool) {
   state.tool = tool; state.comparing = false;
   if (tool !== "number") state.reboxFor = null;
+  if (["drawQR", "drawMask", "number"].includes(tool)) revealCanvas();
   updateToolControls(); renderView(false);
 }
 function viewPos(e) {
@@ -826,12 +968,11 @@ function addManualQR(r) {
   const center = quadCenter(loc);
   const duplicate = state.detections.find(d => {
     const c = quadCenter(d.loc);
-    return Math.hypot(c.x - center.x, c.y - center.y) < Math.min(r.w, r.h) * 0.3;
+    return sameRegion(loc, d.loc) || Math.hypot(c.x - center.x, c.y - center.y) < Math.min(r.w, r.h) * 0.3;
   });
   if (duplicate) { selectDetection(duplicate.id); toast("该二维码已存在，已选中，可拖动四角调整"); return; }
-  const det = { id: Math.max(0, ...state.detections.map(d => d.id)) + 1, data: res?.data || "", version: res?.version || 0, loc, enabled: true, manual: true };
-  det.foot = measureFootprint(det); suggestNumberRegion(det);
-  state.detections.push(det); state.selectedId = det.id;
+  const det = initializeDetection({ data: res?.data || "", version: res?.version || 0, loc, manual: true }, Math.max(0, ...state.detections.map(d => d.id)) + 1);
+  state.detections.push(det); state.selectedId = det.id; state.selectedMaskId = null;
   toast(res ? "局部识别成功，可继续调整四角" : "已添加手动区域，请将四角贴合码区边缘（不含白边）");
 }
 
@@ -852,20 +993,31 @@ viewport.addEventListener("pointerdown", e => {
   const inside = x >= 0 && x <= W && y >= 0 && y <= H;
   if (state.comparing || state.tool === "pan" || e.button === 1 || !inside) {
     dragInfo = { kind: "pan", sx: e.clientX, sy: e.clientY, ox: camera.x, oy: camera.y };
-  } else if (state.tool === "drawQR") {
-    dragInfo = { kind: "drawQR", x0: x, y0: y, rect: null };
+  } else if (["drawQR", "drawMask"].includes(state.tool)) {
+    dragInfo = { kind: state.tool, x0: x, y0: y, rect: null };
   } else if (state.reboxFor) {
     const det = state.detections.find(d => d.id === state.reboxFor.id);
     if (det) { dragInfo = { kind: "rebox", det, x0: x, y0: y, before: JSON.parse(JSON.stringify(captureEdit())) }; det.numMode = state.reboxFor.mode; }
   } else {
     const before = () => JSON.parse(JSON.stringify(captureEdit()));
-    const tol = 12 * scale;
+    const tol = (e.pointerType === "touch" ? 18 : 12) * scale;
+    for (const mask of [...state.masks].reverse()) {
+      const r = mask.rect;
+      if (mask.id === state.selectedMaskId) for (const [corner,cx,cy] of [["tl",r.x,r.y],["tr",r.x+r.w,r.y],["br",r.x+r.w,r.y+r.h],["bl",r.x,r.y+r.h]]) {
+        if (Math.abs(x-cx) <= tol && Math.abs(y-cy) <= tol) { dragInfo = { kind: "maskResize", mask, corner, orig: { ...r }, before: before() }; break; }
+      }
+      if (dragInfo) break;
+      if (x >= r.x && x <= r.x+r.w && y >= r.y && y <= r.y+r.h) {
+        state.selectedMaskId = mask.id; state.selectedId = null;
+        dragInfo = { kind: "maskMove", mask, dx:x-r.x, dy:y-r.y, before:before() }; break;
+      }
+    }
     const selected = state.detections.find(d => d.id === state.selectedId);
-    if (selected) for (const [corner, p] of Object.entries(selected.loc)) {
+    if (selected && !dragInfo) for (const [corner, p] of Object.entries(selected.loc)) {
       if (Math.hypot(x - p.x, y - p.y) <= tol) { dragInfo = { kind: "qrCorner", det: selected, corner, before: before() }; break; }
     }
     if (!dragInfo) for (const det of [...state.detections].reverse()) {
-      if (det.numMode === "off" || !det.numRegion) continue;
+      if (!det.enabled || det.numMode === "off" || !det.numRegion) continue;
       const r = det.numRegion;
       for (const [corner, cx, cy] of [["tl", r.x, r.y], ["tr", r.x + r.w, r.y], ["br", r.x + r.w, r.y + r.h], ["bl", r.x, r.y + r.h]]) {
         if (Math.abs(x - cx) <= tol && Math.abs(y - cy) <= tol) { dragInfo = { kind: "resize", det, corner, orig: { ...r }, before: before() }; break; }
@@ -875,7 +1027,7 @@ viewport.addEventListener("pointerdown", e => {
     }
     if (!dragInfo) dragInfo = { kind: "click", x0: x, y0: y, sx: e.clientX, sy: e.clientY, ox: camera.x, oy: camera.y };
   }
-  if (["drawQR", "rebox", "qrCorner", "resize", "move"].includes(dragInfo?.kind)) invalidateValidation();
+  if (["drawQR", "drawMask", "rebox", "qrCorner", "resize", "move", "maskMove", "maskResize"].includes(dragInfo?.kind)) invalidateValidation();
   updateExportControls();
 });
 viewport.addEventListener("pointermove", e => {
@@ -893,7 +1045,7 @@ viewport.addEventListener("pointermove", e => {
   if (d.kind === "pan") { camera.x = d.ox + e.clientX - d.sx; camera.y = d.oy + e.clientY - d.sy; applyViewTransform(); return; }
   if (d.kind === "click") return;
   const pos = viewPos(e), x = clampNum(pos.x, 0, view.width), y = clampNum(pos.y, 0, view.height);
-  if (d.kind === "drawQR") {
+  if (["drawQR", "drawMask"].includes(d.kind)) {
     d.rect = { x: Math.min(d.x0, x), y: Math.min(d.y0, y), w: Math.abs(x - d.x0), h: Math.abs(y - d.y0) };
     scheduleRenderView(false); return;
   }
@@ -901,10 +1053,10 @@ viewport.addEventListener("pointermove", e => {
     const q = { ...d.det.loc, [d.corner]: { x, y } };
     if (!validQuad(q)) return;
     d.det.loc = q; d.det.foot = measureFootprint(d.det);
-  } else if (d.kind === "move") {
-    const r = d.det.numRegion; r.x = clampNum(x - d.dx, 0, view.width - r.w); r.y = clampNum(y - d.dy, 0, view.height - r.h);
-  } else if (d.kind === "resize") {
-    const r = d.det.numRegion, o = d.orig;
+  } else if (d.kind === "move" || d.kind === "maskMove") {
+    const r = d.mask ? d.mask.rect : d.det.numRegion; r.x = clampNum(x - d.dx, 0, view.width - r.w); r.y = clampNum(y - d.dy, 0, view.height - r.h);
+  } else if (d.kind === "resize" || d.kind === "maskResize") {
+    const r = d.mask ? d.mask.rect : d.det.numRegion, o = d.orig;
     let x0 = o.x, y0 = o.y, x1 = o.x + o.w, y1 = o.y + o.h;
     if (d.corner.includes("l")) x0 = Math.min(x, x1 - 8);
     if (d.corner.includes("r")) x1 = Math.max(x, x0 + 8);
@@ -915,7 +1067,7 @@ viewport.addEventListener("pointermove", e => {
   } else if (d.kind === "rebox") {
     d.det.numRegion = { x: Math.min(d.x0, x), y: Math.min(d.y0, y), w: Math.abs(x - d.x0), h: Math.abs(y - d.y0) };
   }
-  d.det._numAn = null; invalidateValidation(); scheduleRenderView();
+  if (d.det) d.det._numAn = null; invalidateValidation(); scheduleRenderView();
 });
 viewport.addEventListener("pointerup", e => {
   pointers.delete(e.pointerId);
@@ -925,10 +1077,10 @@ viewport.addEventListener("pointerup", e => {
   if (d.kind === "pinch" || d.kind === "pan") { updateExportControls(); return; }
   if (d.kind === "click") {
     const det = [...state.detections].reverse().find(t => pointInQuad(d.x0, d.y0, t.loc));
-    if (det) { state.selectedId = det.id; renderDetList(); renderView(false); }
+    if (det) selectDetection(det.id, false);
     updateExportControls(); return;
   }
-  if (d.kind === "drawQR") { addManualQR(d.rect); setTool("select"); editChanged(); return; }
+  if (["drawQR", "drawMask"].includes(d.kind)) { if (d.kind === "drawQR") addManualQR(d.rect); else addMask(d.rect); setTool("select"); editChanged(); return; }
   if (d.kind === "rebox") {
     const r = d.det.numRegion;
     if (!r || r.w < 8 || r.h < 8) { restoreEdit(d.before); toast("框选范围太小，已恢复"); }
@@ -943,6 +1095,9 @@ viewport.addEventListener("wheel", e => {
   zoomAt(Math.exp(-clampNum(e.deltaY, -100, 100) * 0.005), e.clientX - rect.left, e.clientY - rect.top);
 }, { passive: false });
 new ResizeObserver(() => { if (state.img && !dragInfo) fitView(); }).observe(viewport);
+new ResizeObserver(() => {
+  stage.style.setProperty("--toolbar-height", `${$("editorToolbar").getBoundingClientRect().height}px`);
+}).observe($("editorToolbar"));
 
 function invalidateValidation() {
   revision++;
@@ -957,12 +1112,14 @@ function showValidation(results, detections) {
   const list = $("validationResults"); list.replaceChildren();
   for (const r of results) {
     const row = document.createElement("div"); row.className = `validation-row ${r.status}`;
-    row.textContent = `#${r.id} ${r.status === "passed" ? "通过" : r.status === "failed" ? "未通过" : "未验证"} · ${r.message}`;
+    const det = detections.find(d => d.id === r.id);
+    const message = r.status === "skipped" && det?.mode === "cover" ? "二维码遮盖模式，无需回扫" : r.status === "skipped" && det?.mode === "keep" ? "保留原码，无需回扫" : r.message;
+    row.textContent = `#${r.id} ${r.status === "passed" ? "通过" : r.status === "failed" ? "未通过" : "未验证"} · ${message}`;
     list.appendChild(row);
   }
   const activeIds = new Set(detections.filter(d => d.enabled).map(d => d.id));
   const checked = results.filter(r => activeIds.has(r.id)), failed = checked.filter(r => r.status !== "passed");
-  $("validationSummary").textContent = !checked.length ? "没有启用的二维码替换，未执行回扫" : failed.length ? `${failed.length} / ${checked.length} 个替换区域未通过，请检查四角和内容` : `${checked.length} 个替换区域全部通过当前解码器验证`;
+  $("validationSummary").textContent = !checked.length ? "本次没有替换二维码；遮盖与保留操作无需回扫" : failed.length ? `${failed.length} / ${checked.length} 个替换区域未通过，请检查四角和内容` : `${checked.length} 个替换区域全部通过当前解码器验证`;
 }
 function canvasBlob(canvas) {
   return new Promise((resolve, reject) => canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error("图片编码失败，请尝试缩小原图")), "image/png"));
@@ -976,17 +1133,17 @@ async function blobCanvas(blob) {
   } finally { URL.revokeObjectURL(url); }
 }
 async function verifyResult(action = "verify") {
-  if (!state.img || validationRun || dragInfo) return;
+  if (!state.img || validationRun || dragInfo || scanRun) return;
   commitHistory(); if (!renderResult()) { renderView(false); toast(renderError); return; }
   const token = revision, controller = new AbortController(), run = { controller };
-  const detections = JSON.parse(JSON.stringify(state.detections.map(({ id, enabled, loc, version, generatedVersion }) => ({ id, enabled, loc, version, generatedVersion }))));
+  const detections = JSON.parse(JSON.stringify(state.detections.map(d => ({ id: d.id, enabled: d.enabled && d.mode === "replace", loc: d.loc, version: d.version, generatedVersion: d.generatedVersion, expectedText: d.text, mode: d.mode }))));
   const text = state.text;
   const frozen = document.createElement("canvas"); frozen.width = resultCanvas.width; frozen.height = resultCanvas.height;
   frozen.getContext("2d").drawImage(resultCanvas, 0, 0);
   validationRun = run; updateExportControls(); $("validationSummary").textContent = "正在验证最终 PNG…";
   let decodedCanvas;
   try {
-    const blob = await canvasBlob(frozen);
+    const blob = await canvasBlob(frozen); frozen.width = frozen.height = 1;
     if (token !== revision) return;
     decodedCanvas = await blobCanvas(blob);
     if (token !== revision) return;
@@ -1000,8 +1157,9 @@ async function verifyResult(action = "verify") {
     const prepared = { blob, action, revision: token, name: exportName() };
     if (results.some(r => r.status !== "passed" && detections.some(d => d.id === r.id && d.enabled))) {
       pendingExport = prepared;
+      $("exportDialogTitle").textContent = "请检查扫描验证结果";
       $("exportDialogMessage").textContent = "部分替换区域未能扫描出预期内容。可以返回调整四角、缩短文本后重试，也可以导出当前结果。";
-      $("btnExportAnyway").textContent = action === "copy" ? "仍然复制" : "仍然下载";
+      $("btnExportAnyway").textContent = action === "copy" ? "仍然复制" : action === "share" ? "仍然分享" : "仍然下载";
       $("exportDialog").showModal();
     } else await performExport(prepared);
   } catch (e) {
@@ -1015,13 +1173,25 @@ async function verifyResult(action = "verify") {
 }
 async function performExport(prepared) {
   if (!prepared || prepared.revision !== revision) { toast("图片已修改，请重新验证"); return; }
-  if (prepared.action === "copy") {
+  if (prepared.action === "share") {
+    try {
+      const file = new File([prepared.blob], prepared.name, { type: "image/png" });
+      if (!navigator.canShare?.({ files: [file] })) { toast("当前浏览器不支持分享图片，请下载 PNG"); return; }
+      if (navigator.userActivation && !navigator.userActivation.isActive) {
+        pendingExport = prepared; $("exportDialogTitle").textContent = "图片已准备好";
+        $("exportDialogMessage").textContent = "点击分享，将打开设备的分享菜单。";
+        $("btnExportAnyway").textContent = "分享图片"; $("exportDialog").showModal(); return;
+      }
+      await navigator.share({ files: [file], title: "QR 置换台" });
+    } catch (e) { if (e.name !== "AbortError" && prepared.revision === revision) toast("分享未完成，请使用下载 PNG"); }
+  } else if (prepared.action === "copy") {
     try {
       if (!navigator.clipboard?.write || typeof ClipboardItem === "undefined") throw new Error("当前浏览器不支持复制图片，请使用下载 PNG");
       await navigator.clipboard.write([new ClipboardItem({ "image/png": prepared.blob })]); toast("已复制结果");
     } catch (e) {
       if (prepared.revision !== revision) return;
       pendingExport = prepared;
+      $("exportDialogTitle").textContent = "复制图片";
       $("exportDialogMessage").textContent = `复制未完成：${e.message || e}。可再次点击复制，或取消后下载 PNG。`;
       $("btnExportAnyway").textContent = "再次复制";
       if (!$("exportDialog").open) $("exportDialog").showModal();
@@ -1040,24 +1210,37 @@ function exportName() {
   return `${base}-${ts}-${p(saveSeq)}.png`;
 }
 
-function loadImage(img) {
-  cancelInteraction(); clearTimeout(historyTimer); qrCache.clear();
+async function loadImage(img, sourceName = state.srcName) {
+  if (!img.naturalWidth || !img.naturalHeight || img.naturalWidth * img.naturalHeight > 32000000 || Math.max(img.naturalWidth, img.naturalHeight) > 16384) {
+    throw new Error("图片过大或无效，请使用 3200 万像素以内且单边不超过 16384 像素的图片。");
+  }
+  const hadImage = !!state.img;
+  stopScan(); cancelInteraction(); clearTimeout(historyTimer); qrCache.clear();
+  state.srcName = sourceName;
   state.img = img; state.reboxFor = null; state.comparing = false;
+  state.detections = []; state.masks = []; state.selectedId = null; state.selectedMaskId = null;
+  // 默认文本只来自明确保存的值，图片间不会带入上一张的逐码内容。
+  if (hadImage) { state.text = preferences.text; state.defaultMode = preferences.defaultMode; }
+  state.ec = preferences.ec; state.matchVersion = preferences.matchVersion; state.allowUpgrade = preferences.allowUpgrade;
   const c = document.createElement("canvas"); c.width = img.naturalWidth; c.height = img.naturalHeight;
   c.getContext("2d").drawImage(img, 0, 0); state.srcCanvas = c;
   dropzone.classList.add("hidden"); view.classList.remove("hidden"); viewport.classList.remove("hidden");
   for (const id of ["editorToolbar", "editorHint", "btnReimport"]) $(id).classList.remove("hidden");
-  btnRescan.disabled = false;
-  runDetection(); state.selectedId = state.detections[0]?.id ?? null;
   invalidateValidation(); renderView(); fitView(); renderDetList();
+  initialEdit = JSON.parse(JSON.stringify(captureEdit()));
   editorHistory.reset(captureEdit()); updateHistoryControls(); updateToolControls();
-  toast(state.detections.length ? `检测到 ${state.detections.length} 个二维码` : "未检测到二维码，可用手动框选局部识别");
+  await runDetection({ initial: true });
 }
 function loadFile(file) {
   if (!file || !file.type.startsWith("image/")) { toast("请选择图片文件"); return; }
   const sequence = ++importSequence, url = URL.createObjectURL(file), img = new Image();
-  img.onload = () => { try { if (sequence === importSequence) { state.srcName = file.name || null; loadImage(img); } } finally { URL.revokeObjectURL(url); } };
-  img.onerror = () => { if (sequence === importSequence) toast("图片载入失败"); URL.revokeObjectURL(url); };
+  img.onload = async () => {
+    try {
+      if (sequence === importSequence) { await loadImage(img, file.name || null); }
+    } catch (e) { if (sequence === importSequence) { $("scanStatus").textContent = e.message; toast(e.message); } }
+    finally { URL.revokeObjectURL(url); }
+  };
+  img.onerror = () => { if (sequence === importSequence) toast("图片载入失败，请确认格式受浏览器支持"); URL.revokeObjectURL(url); };
   img.src = url;
 }
 
@@ -1076,40 +1259,98 @@ document.addEventListener("dragleave", () => { dragDepth = Math.max(0, dragDepth
 document.addEventListener("dragover", e => e.preventDefault());
 document.addEventListener("drop", e => { e.preventDefault(); dragDepth = 0; draghint.classList.add("hidden"); loadFile(e.dataTransfer.files[0]); });
 
-inpText.addEventListener("input", () => { state.text = inpText.value; editChanged({ deferHistory: true }); });
+inpText.addEventListener("input", () => {
+  const det = selectedDetection(); if (det) det.text = inpText.value; else state.text = inpText.value;
+  editChanged({ deferHistory: true });
+});
 inpText.addEventListener("blur", commitHistory);
-for (const p of PRESETS) {
-  const chip = document.createElement("button"); chip.className = "chip"; chip.textContent = p; chip.title = p;
-  chip.addEventListener("click", () => { cancelInteraction(); commitHistory(); state.text = p; inpText.value = p; editChanged(); }); presetsBox.appendChild(chip);
-}
+$("segMode").addEventListener("click", e => {
+  const btn = e.target.closest("button[data-mode]"); if (!btn) return;
+  cancelInteraction(); commitHistory();
+  const det = selectedDetection(); if (det) det.mode = btn.dataset.mode; else state.defaultMode = btn.dataset.mode;
+  editChanged();
+});
+$("btnApplyAll").addEventListener("click", () => {
+  const value = selectedDetection()?.text; if (!value) return;
+  cancelInteraction(); commitHistory();
+  let count = 0; for (const det of state.detections) if (det.mode === "replace" && det.enabled) { det.text = value; count++; }
+  editChanged(); toast(`已将内容应用到 ${count} 个替换目标，可撤销`);
+});
+$("btnSavePreset").addEventListener("click", () => {
+  const value = selectedDetection()?.text ?? state.text;
+  if (!value.trim()) { toast("请先输入要保存的替换内容"); return; }
+  if (Array.from(value).length > 3000) { toast("预设最多保存 3000 个字符，请缩短内容"); return; }
+  if (preferences.presets.length >= 24) { toast("最多保存 24 个预设，请先删除不需要的预设"); return; }
+  const name = $("inpPresetName").value.trim() || Array.from(value).slice(0, 16).join("");
+  preferences.presets.push({ id: `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`, name, text: value });
+  const ok = storePreferences("自定义预设已保存"); renderPresets(); $("inpPresetName").value = "";
+  toast(ok ? "预设已保存" : "预设暂存本次会话，浏览器存储不可用");
+});
+$("btnRememberDefaults").addEventListener("click", () => {
+  const det = selectedDetection(), mask = selectedMask();
+  const text = det?.text ?? state.text, mode = det?.mode ?? state.defaultMode;
+  if (Array.from(text).length > 3000 || (mode === "replace" && !text.trim())) { toast("默认替换内容不能为空或超过 3000 个字符"); return; }
+  preferences.text = text; preferences.defaultMode = mode; state.defaultMode = mode;
+  preferences.ec = state.ec; preferences.matchVersion = state.matchVersion; preferences.allowUpgrade = state.allowUpgrade;
+  if (mask) { preferences.maskColor = mask.color; preferences.maskAuto = mask.auto; }
+  state.text = text;
+  if (storePreferences("默认内容和设置已保存，下次导入时使用")) toast("已记住默认内容和设置");
+});
+$("btnClearPreferences").addEventListener("click", () => {
+  const cleared = QRPreferences.clear();
+  if (!cleared.ok) { $("storageStatus").textContent = cleared.error; return; }
+  preferences = QRPreferences.normalize(QRPreferences.DEFAULTS);
+  renderPresets(); updateEditor(); $("storageStatus").textContent = "已清除保存的预设与默认值；当前图片编辑保持不变";
+  toast("已清除保存的偏好");
+});
 segEc.addEventListener("click", e => {
   const btn = e.target.closest("button[data-ec]"); if (!btn) return;
-  cancelInteraction(); commitHistory(); state.ec = btn.dataset.ec;
-  segEc.querySelectorAll("button").forEach(b => { b.classList.toggle("on", b === btn); b.setAttribute("aria-pressed", String(b === btn)); }); editChanged();
+  cancelInteraction(); commitHistory(); state.ec = btn.dataset.ec; editChanged(); rememberRendering();
 });
-chkMatch.addEventListener("change", () => { cancelInteraction(); commitHistory(); state.matchVersion = chkMatch.checked; editChanged(); });
-btnRescan.addEventListener("click", () => {
-  if (!state.img) return;
-  cancelInteraction(); commitHistory();
-  const old = state.detections; runDetection();
-  const used = new Set(); let nextId = Math.max(0, ...old.map(d => d.id)) + 1;
-  state.detections = state.detections.map(fresh => {
-    const center = quadCenter(fresh.loc);
-    const match = old.find(d => !used.has(d.id) && d.data === fresh.data && pointInQuad(center.x, center.y, expandQuad(d.loc, 1.3)));
-    if (match) { used.add(match.id); return match; }
-    fresh.id = nextId++; return fresh;
-  });
-  for (const d of old) if (!used.has(d.id)) state.detections.push(d);
-  editChanged(); toast(`重扫完成，共 ${state.detections.length} 个区域，已保留现有编辑`);
+chkMatch.addEventListener("change", () => {
+  const checked = chkMatch.checked; cancelInteraction(); commitHistory(); state.matchVersion = checked; editChanged(); rememberRendering();
+});
+$("chkAllowUpgrade").addEventListener("change", e => {
+  const checked = e.target.checked; cancelInteraction(); commitHistory(); state.allowUpgrade = checked; editChanged(); rememberRendering();
+});
+$("inpMaskColor").addEventListener("input", e => {
+  const mask = selectedMask(); if (!mask) return;
+  mask.color = e.target.value; mask.auto = false; editChanged({ deferHistory: true });
+});
+$("inpMaskColor").addEventListener("change", () => {
+  commitHistory(); const mask = selectedMask(); if (mask) { preferences.maskColor = mask.color; preferences.maskAuto = mask.auto; storePreferences(); }
+});
+$("chkMaskAuto").addEventListener("change", e => {
+  const checked = e.target.checked; cancelInteraction(); commitHistory(); const mask = selectedMask(); if (!mask) return;
+  mask.auto = checked; editChanged(); preferences.maskAuto = mask.auto; storePreferences();
+});
+$("btnDeleteMask").addEventListener("click", () => {
+  const id = state.selectedMaskId; cancelInteraction(); commitHistory();
+  state.masks = state.masks.filter(m => m.id !== id); state.selectedMaskId = null; state.selectedId = state.detections[0]?.id ?? null; editChanged();
+});
+btnRescan.addEventListener("click", () => { if (state.img) { cancelInteraction(); runDetection(); } });
+$("btnCancelScan").addEventListener("click", stopScan);
+$("btnResetEdits").addEventListener("click", () => {
+  if (!initialEdit) return;
+  cancelInteraction(); commitHistory(); restoreEdit(JSON.parse(JSON.stringify(initialEdit))); commitHistory(); toast("已重置编辑，可撤销恢复");
 });
 $("btnUndo").addEventListener("click", () => undoEdit()); $("btnRedo").addEventListener("click", () => undoEdit(true));
 $("btnAddQr").addEventListener("click", () => { const active = state.tool === "drawQR"; cancelInteraction(); commitHistory(); setTool(active ? "select" : "drawQR"); });
+for (const id of ["btnAddMask", "btnAddMaskPanel"]) $(id).addEventListener("click", () => {
+  if (!state.img) return; const active = state.tool === "drawMask"; cancelInteraction(); commitHistory(); setTool(active ? "select" : "drawMask");
+});
 $("btnPan").addEventListener("click", () => { const active = state.tool === "pan"; cancelInteraction(); setTool(active ? "select" : "pan"); });
 $("btnCompare").addEventListener("click", () => { const next = !state.comparing; cancelInteraction(); state.comparing = next; updateToolControls(); renderView(false); });
 $("btnZoomIn").addEventListener("click", () => zoomAt(1.25)); $("btnZoomOut").addEventListener("click", () => zoomAt(0.8)); $("btnFit").addEventListener("click", fitView);
 $("btnCancelEdit").addEventListener("click", cancelInteraction);
 $("btnVerify").addEventListener("click", () => verifyResult());
 btnDownload.addEventListener("click", () => verifyResult("download")); btnCopy.addEventListener("click", () => verifyResult("copy"));
+function supportsImageSharing() {
+  try { return !!navigator.share && !!navigator.canShare?.({ files: [new File([new Uint8Array([0])], "qr-result.png", { type: "image/png" })] }); }
+  catch (_) { return false; }
+}
+$("btnShare").classList.toggle("hidden", !supportsImageSharing());
+$("btnShare").addEventListener("click", () => verifyResult("share"));
 $("btnExportCancel").addEventListener("click", () => { pendingExport = null; $("exportDialog").close(); });
 $("exportDialog").addEventListener("cancel", () => { pendingExport = null; });
 $("btnExportAnyway").addEventListener("click", () => { const prepared = pendingExport; pendingExport = null; $("exportDialog").close(); performExport(prepared); });
@@ -1123,4 +1364,5 @@ document.addEventListener("keydown", e => {
   else if (e.key === "-") { e.preventDefault(); zoomAt(0.8); }
   else if (e.key === "0") { e.preventDefault(); fitView(); }
 });
-updateHistoryControls();
+$("storageStatus").textContent = savedPreferences.ok ? "预设和设置只保存在此浏览器；默认替换文本需主动保存" : savedPreferences.error;
+renderPresets(); updateEditor(); updateHistoryControls();

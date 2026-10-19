@@ -92,6 +92,73 @@ test("rejects a readable QR with wrong contents", async () => {
   assert.match(result.message, /不一致/);
 });
 
+test("each target verifies its own payload instead of the global fallback", async () => {
+  const canvas = new PixelCanvas(500, 250);
+  const first = drawQR(canvas, "first replacement", 30, 40);
+  const second = drawQR(canvas, "second replacement", 290, 40);
+  const results = await QRValidation.verifyCanvas(canvas, [
+    target(first, { id: "first", expectedText: "first replacement" }),
+    target(second, { id: "second", expectedText: "second replacement" }),
+  ], "unused global replacement");
+  assert.deepEqual(results.map(({ id, status, decoded }) => ({ id, status, decoded })), [
+    { id: "first", status: "passed", decoded: "first replacement" },
+    { id: "second", status: "passed", decoded: "second replacement" },
+  ]);
+});
+
+test("swapped per-target expectations fail even when both payloads exist in the image", async () => {
+  const canvas = new PixelCanvas(500, 250);
+  const first = drawQR(canvas, "first replacement", 30, 40);
+  const second = drawQR(canvas, "second replacement", 290, 40);
+  const results = await QRValidation.verifyCanvas(canvas, [
+    target(first, { expectedText: "second replacement" }),
+    target(second, { id: 2, expectedText: "first replacement" }),
+  ], "first replacement");
+  assert.deepEqual(results.map((result) => result.status), ["failed", "failed"]);
+  assert.deepEqual(results.map((result) => result.decoded), ["first replacement", "second replacement"]);
+  assert.ok(results.every((result) => /不一致/.test(result.message)));
+});
+
+test("targets without their own expected text still use the fallback in a mixed edit", async () => {
+  const canvas = new PixelCanvas(500, 250);
+  const first = drawQR(canvas, "independent replacement", 30, 40);
+  const second = drawQR(canvas, "global replacement", 290, 40);
+  const results = await QRValidation.verifyCanvas(canvas, [
+    target(first, { expectedText: "independent replacement" }),
+    target(second, { id: 2 }),
+  ], "global replacement");
+  assert.deepEqual(results.map((result) => result.status), ["passed", "passed"]);
+  assert.deepEqual(results.map((result) => result.decoded), ["independent replacement", "global replacement"]);
+});
+
+test("empty or invalid explicit target content cannot silently fall back to a valid global text", async () => {
+  const canvas = new PixelCanvas(240, 240);
+  const loc = drawQR(canvas, "global replacement", 40, 40);
+  const results = await QRValidation.verifyCanvas(canvas,
+    ["", null, undefined, 123].map((expectedText, id) => target(loc, { id, expectedText })),
+    "global replacement");
+  assert.ok(results.every((result) => result.status === "failed"));
+  assert.ok(results.every((result) => /内容为空/.test(result.message)));
+});
+
+test("keep and cover targets disabled by the caller skip validation before reading pixels", async () => {
+  const canvas = {
+    width: 240, height: 240,
+    getContext() { throw new Error("Skipped targets must not inspect export pixels"); },
+  };
+  const progress = [];
+  const results = await QRValidation.verifyCanvas(canvas, [
+    { id: "kept", mode: "keep", enabled: false, expectedText: "" },
+    { id: "covered", mode: "cover", enabled: false, expectedText: "covered text" },
+  ], "global replacement", { onProgress: (item) => progress.push(item) });
+  assert.deepEqual(results.map(({ id, status }) => ({ id, status })), [
+    { id: "kept", status: "skipped" },
+    { id: "covered", status: "skipped" },
+  ]);
+  assert.deepEqual(progress.map((item) => item.completed), [1, 2]);
+  assert.equal(progress.at(-1).total, 2);
+});
+
 test("perspective fallback decodes sampled export pixels at the correct location", async () => {
   const canvas = new PixelCanvas(300, 280);
   const qr = qrcode(3, "M");

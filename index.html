@@ -27,6 +27,10 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
       <span class="btn-label">复制结果</span>
     </button>
+    <button id="btnShare" class="btn ghost hidden" disabled title="分享结果图片" aria-label="分享结果图片">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V3m-4 4 4-4 4 4"/><path d="M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-7"/></svg>
+      <span class="btn-label">分享</span>
+    </button>
     <button id="btnDownload" class="btn primary" disabled title="下载 PNG" aria-label="下载 PNG">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
       <span class="btn-label">下载 PNG</span>
@@ -46,7 +50,8 @@
       <button id="btnUndo" class="btn mini ghost" disabled title="撤销上一步（⌘/Ctrl Z）" aria-label="撤销上一步">撤销</button>
       <button id="btnRedo" class="btn mini ghost" disabled title="重做（⌘/Ctrl Shift Z）" aria-label="重做">重做</button>
       <span class="toolbar-divider" aria-hidden="true"></span>
-      <button id="btnAddQr" class="btn mini ghost" title="框选遗漏的二维码，再调整四角" aria-label="手动框选二维码" aria-pressed="false">手动框选</button>
+      <button id="btnAddQr" class="btn mini ghost" title="框选遗漏的二维码，再调整四角" aria-label="手动框选二维码" aria-pressed="false">框选二维码</button>
+      <button id="btnAddMask" class="btn mini ghost" title="框选图片上需要遮盖的区域" aria-label="添加遮盖区域" aria-pressed="false">添加遮盖</button>
       <button id="btnPan" class="btn mini ghost" title="拖动图片以平移视图" aria-label="平移图片" aria-pressed="false">平移</button>
       <button id="btnCompare" class="btn mini ghost" title="切换查看原图" aria-label="切换查看原图" aria-pressed="false">原图</button>
       <div class="zoom-controls" role="group" aria-label="图片缩放">
@@ -72,50 +77,110 @@
 
   <aside class="panel">
 
-    <div class="group">
-      <label class="group-label" id="textLabel" for="inpText">替换内容</label>
-      <textarea id="inpText" rows="2" spellcheck="false" aria-labelledby="textLabel">你还真扫啊</textarea>
-      <div class="chips" id="presets"></div>
-    </div>
-
-    <div class="group">
-      <div class="group-label">渲染</div>
-      <div class="optrow">
-        <span class="optname">容错等级</span>
-        <div class="seg" id="segEc">
-          <button data-ec="L">L</button>
-          <button data-ec="M" class="on">M</button>
-          <button data-ec="Q">Q</button>
-          <button data-ec="H">H</button>
-        </div>
-      </div>
-      <label class="optrow toggle">
-        <span class="optname">沿用原码版本<span class="optdesc">模块网格密度一致，肉眼难辨</span></span>
-        <input type="checkbox" id="chkMatch" checked><span class="switch"></span>
-      </label>
-    </div>
-
-    <div class="group validation-group">
+    <section class="group targets-group" aria-labelledby="targetsLabel">
       <div class="group-label row">
-        <span>扫描验证</span>
-        <button class="btn mini ghost" id="btnVerify" disabled title="重新扫描最终图片，检查替换内容" aria-label="验证替换结果">验证结果</button>
-      </div>
-      <p id="validationSummary" class="validation-summary">导出前将自动验证替换结果</p>
-      <div id="validationResults" class="validation-results" aria-live="polite" aria-atomic="true"></div>
-    </div>
-
-    <div class="group grow">
-      <div class="group-label row">
-        <span>检测结果</span>
-        <button class="btn mini ghost" id="btnRescan" disabled title="重新扫描">
+        <h2 id="targetsLabel"><span class="step-number">1</span> 选择处理目标</h2>
+        <button class="btn mini ghost" id="btnRescan" disabled title="重新扫描并保留已有编辑">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg>
           重扫
         </button>
       </div>
+      <div class="scan-progress">
+        <p id="scanStatus" class="field-hint" role="status" aria-live="polite">载入图片后自动检测二维码</p>
+        <button id="btnCancelScan" class="btn mini ghost hidden">取消识别</button>
+      </div>
       <div class="dets" id="dets">
         <div class="dets-empty" id="detsEmpty">尚未载入图片</div>
       </div>
-    </div>
+      <div class="masks" id="masks" aria-label="遮盖区域"></div>
+      <div class="target-tools">
+        <button id="btnAddMaskPanel" class="btn mini ghost" disabled>＋ 添加遮盖区域</button>
+        <button id="btnResetEdits" class="btn mini subtle" disabled title="恢复当前图片的所有编辑，可撤销">重置编辑</button>
+      </div>
+      <p class="field-hint">点击目标定位并编辑；独立开关控制整组修改。</p>
+    </section>
+
+    <section class="group selection-group" aria-labelledby="selectionHeading">
+      <div class="group-label"><h2 id="selectionHeading"><span class="step-number">2</span> 编辑所选目标</h2></div>
+      <div class="selection-heading">
+        <h3 id="selectionLabel">尚未选择目标</h3>
+        <p id="selectionHelp" class="field-hint">载入图片后，点击上方目标开始编辑。</p>
+      </div>
+
+      <div id="qrEditor" class="target-editor">
+        <div class="seg mode-seg" id="segMode" role="group" aria-label="二维码处理方式">
+          <button data-mode="replace" class="on" aria-pressed="true">替换内容</button>
+          <button data-mode="cover" aria-pressed="false">遮盖二维码</button>
+          <button data-mode="keep" aria-pressed="false">保留原码</button>
+        </div>
+        <label class="field-label" id="textLabel" for="inpText">当前二维码的替换内容</label>
+        <textarea id="inpText" rows="3" spellcheck="false" aria-labelledby="textLabel" aria-describedby="editorError" placeholder="输入文字或链接；留空时不会生成替换码">你还真扫啊</textarea>
+        <div id="editorError" class="editor-error hidden" role="alert"></div>
+        <button id="btnApplyAll" class="btn mini ghost" disabled title="将当前替换内容应用到所有处于替换模式的二维码">将此内容应用到所有替换目标</button>
+        <div class="presets-section">
+          <span class="field-label">快速填入</span>
+          <div class="chips" id="presets"></div>
+          <div class="chips custom-presets" id="customPresets" aria-label="自定义预设"></div>
+          <div class="preset-save-row">
+            <label for="inpPresetName" class="sr-only">新预设名称</label>
+            <input id="inpPresetName" class="text-input" type="text" maxlength="40" placeholder="预设名称" autocomplete="off">
+            <button id="btnSavePreset" class="btn mini ghost" title="将当前替换内容保存为预设">保存预设</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="maskEditor" class="target-editor hidden">
+        <p class="field-hint">拖动遮盖区域移动位置，拖动边角调整大小。</p>
+        <label class="optrow toggle">
+          <span class="optname">自动取底色<span class="optdesc">使用区域周围的颜色填充</span></span>
+          <input type="checkbox" id="chkMaskAuto" checked><span class="switch"></span>
+        </label>
+        <label class="optrow" for="inpMaskColor">
+          <span class="optname">填充颜色</span>
+          <input id="inpMaskColor" type="color" value="#ffffff" aria-label="遮盖区域填充颜色">
+        </label>
+        <button id="btnDeleteMask" class="btn mini ghost danger">删除此遮盖区域</button>
+      </div>
+    </section>
+
+    <details class="group advanced-group" id="advancedSettings">
+      <summary>高级设置与偏好<span class="details-hint">渲染 · 默认值</span></summary>
+      <div class="advanced-content">
+        <div class="optrow">
+          <span class="optname">容错等级</span>
+          <div class="seg" id="segEc" role="group" aria-label="二维码容错等级">
+            <button data-ec="L" aria-pressed="false">L</button>
+            <button data-ec="M" class="on" aria-pressed="true">M</button>
+            <button data-ec="Q" aria-pressed="false">Q</button>
+            <button data-ec="H" aria-pressed="false">H</button>
+          </div>
+        </div>
+        <label class="optrow toggle">
+          <span class="optname">沿用原码版本<span class="optdesc">保持原码的模块网格密度</span></span>
+          <input type="checkbox" id="chkMatch" checked><span class="switch"></span>
+        </label>
+        <label class="optrow toggle">
+          <span class="optname">容量不足时允许增加密度<span class="optdesc">开启后可自动使用更高版本</span></span>
+          <input type="checkbox" id="chkAllowUpgrade"><span class="switch"></span>
+        </label>
+        <p class="field-hint">沿用原码版本时，超出容量将提示调整内容。只有开启「允许增加密度」才会自动升级。</p>
+        <div class="preferences-actions">
+          <button id="btnRememberDefaults" class="btn mini ghost">将当前选择设为默认</button>
+          <button id="btnClearPreferences" class="btn mini subtle">清除已保存偏好</button>
+        </div>
+        <p id="storageStatus" class="field-hint" role="status">预设与默认值仅保存在此浏览器，图片不会被保存。</p>
+      </div>
+    </details>
+
+    <section class="group validation-group" aria-labelledby="validationLabel">
+      <div class="group-label row">
+        <h2 id="validationLabel"><span class="step-number">3</span> 验证并导出</h2>
+        <button class="btn mini ghost" id="btnVerify" disabled title="重新扫描最终图片，检查替换内容" aria-label="验证替换结果">验证结果</button>
+      </div>
+      <p id="validationSummary" class="validation-summary">导出前将自动验证替换结果</p>
+      <div id="validationResults" class="validation-results" aria-live="polite" aria-atomic="true"></div>
+      <p class="field-hint">确认结果后，使用顶部按钮下载、复制或分享图片。</p>
+    </section>
 
   </aside>
 </main>
@@ -137,6 +202,8 @@
 <script src="vendor/qrcode_UTF8.js"></script>
 <script src="qr-validation.js"></script>
 <script src="history.js"></script>
+<script src="preferences.js"></script>
+<script src="qr-detection.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

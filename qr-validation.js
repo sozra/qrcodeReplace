@@ -215,6 +215,7 @@
   async function verifyTarget(canvas, det, expectedText, signal) {
     const base = { id: det.id };
     if (!det.enabled) return { ...base, status: "skipped", message: "未启用替换，无需验证" };
+    if (Object.prototype.hasOwnProperty.call(det, "expectedText")) expectedText = det.expectedText;
     if (typeof expectedText !== "string" || expectedText.length === 0) {
       return { ...base, status: "failed", message: "替换内容为空，无法验证二维码" };
     }
