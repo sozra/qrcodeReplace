@@ -6,7 +6,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createBillingHandler } from '../server/billing.mjs';
-import { billingEnv, stripeFixture } from './billing-fixture.mjs';
+import { billingEnv, stripeFixture, notifyPayment } from './billing-fixture.mjs';
 
 export async function run({ browser, url: staticURL }) {
   const fixture = stripeFixture(), handle = createBillingHandler(fixture.fetch);
@@ -67,7 +67,7 @@ export async function run({ browser, url: staticURL }) {
     const newTab = context.waitForEvent('page'); await page.locator('[data-plan="lifetime"]').click(); const checkout = await newTab;
     await checkout.waitForURL('https://checkout.stripe.com/**'); assert.equal(await page.locator('#inpText').inputValue(), 'Billing paid QR');
     await page.locator('#billingRefresh').click(); assert.equal(downloads, 0);
-    fixture.complete('cs_test_1');
+    fixture.complete('cs_test_1'); await notifyPayment(handle, env, fixture.sessions.get('cs_test_1'));
     await page.locator('#billingRefresh').click(); await page.waitForFunction(() => document.querySelector('#billingMessage').textContent.includes('已生效'));
     await page.locator('#billingClose').click(); await downloadAndDecode();
     // A refund is rechecked before export, including when the browser previously showed paid.
@@ -83,7 +83,7 @@ export async function run({ browser, url: staticURL }) {
     assert.equal(await page.locator('#billingAd').isVisible(), true); await importQR(); await downloadAndDecode();
     await page.locator('#billingOpen').click();
     const nextTab = context.waitForEvent('page'); await page.locator('[data-plan="monthly"]').click(); const monthly = await nextTab;
-    await monthly.waitForURL('https://checkout.stripe.com/**'); fixture.complete('cs_test_2', 'monthly');
+    await monthly.waitForURL('https://checkout.stripe.com/**'); fixture.complete('cs_test_2', 'monthly'); await notifyPayment(handle, env, fixture.sessions.get('cs_test_2'));
     await page.locator('#billingRefresh').click(); await page.waitForFunction(() => document.querySelector('#billingAd').classList.contains('hidden'));
     const portalTab = context.waitForEvent('page'); await page.locator('#billingPortal').click(); await (await portalTab).waitForURL('https://billing.stripe.com/**');
     fixture.sessions.get('cs_test_2').subscription.status = 'canceled'; await page.locator('#billingRefresh').click();

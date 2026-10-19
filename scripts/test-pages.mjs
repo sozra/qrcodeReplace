@@ -31,6 +31,9 @@ try {
   assert.deepEqual(await (await get('/api/deployment')).json(), { commit: expected.commit, ...expected.server });
   assert.equal((await (await get('/api/billing/status')).json()).enabled, false);
   assert.equal((await get('/api/unknown')).status, 404);
+  const home = await get('/');
+  assert.match(home.headers.get('content-security-policy'), /script-src 'self'/);
+  assert.equal(home.headers.get('referrer-policy'), 'no-referrer');
   for (const [path, hash] of Object.entries(expected.files)) {
     const response = await get(`/${path}`); assert.equal(response.status, 200);
     assert.equal(createHash('sha256').update(Buffer.from(await response.arrayBuffer())).digest('hex'), hash, path);

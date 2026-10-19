@@ -8,7 +8,9 @@
     "build": "node scripts/build.mjs",
     "test:browser": "node scripts/test-browser.mjs",
     "test:pages": "node scripts/test-pages.mjs",
-    "dev:billing": "wrangler pages dev dist --ip 127.0.0.1 --port 8788 --compatibility-date 2026-10-19",
+    "dev:billing": "wrangler pages dev dist --ip 127.0.0.1 --port 8788 --compatibility-date 2026-10-19 --d1 BILLING_DB",
+    "listen:stripe": "node scripts/listen-stripe.mjs",
+    "sync:stripe": "node scripts/sync-stripe-events.mjs",
     "setup:billing": "node scripts/setup-billing.mjs",
     "deploy": "wrangler pages deploy dist --project-name qr-replace --branch main",
     "verify:deployment": "node scripts/verify-deployment.mjs"

@@ -32,12 +32,13 @@
     el('billingOpen').textContent = status.paid ? '查看购买状态' : '查看测试方案';
     el('billingMessage').textContent = failure || (status.paid ? '测试权益已生效。请回到原来的编辑标签页继续导出。'
       : status.state === 'pending' ? '已打开测试结账页。付款后点击“刷新购买状态”，不必重新导入图片。'
+      : status.state === 'processing' ? '付款已完成，正在等待支付通知。请稍后刷新购买状态。'
       : '这是 Stripe 沙盒测试，不会收取真实费用。请选择测试方案。');
     el('billingBenefit').textContent = status.experiment === 'adfree' ? '解锁效果：隐藏广告占位区，编辑和导出始终免费。' : '解锁效果：下载 PNG、复制结果和分享图片。';
     const container = el('billingPlans'); container.replaceChildren();
     for (const plan of status.plans || []) {
       const button = document.createElement('button'); button.type = 'button'; button.className = 'billing-plan';
-      button.dataset.plan = plan.id; button.disabled = busy || status.paid || !!failure;
+      button.dataset.plan = plan.id; button.disabled = busy || status.paid || status.state === 'processing' || !!failure;
       const title = document.createElement('strong'); title.textContent = plan.id === 'monthly' ? '按月订阅' : '一次性买断';
       const amount = document.createElement('span'); amount.textContent = `${money(plan)}${plan.interval ? ' / 月' : ' / 次'}`;
       const note = document.createElement('small'); note.textContent = plan.id === 'monthly' ? '沙盒内自动续费，可在订阅管理中取消' : '一次测试付款，当前浏览器持续使用';

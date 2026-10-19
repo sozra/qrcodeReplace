@@ -165,37 +165,40 @@ npm run verify:deployment
 ### 本地沙盒联调
 
 1. 在目标 Stripe 账户的 **Sandbox / 测试模式** 中创建测试商品：一次性固定价格和每月固定价格。可先用 USD 5.00 买断、USD 1.00/月验证流程，这不是正式定价。价格不可为零、阶梯计价或按用量计价。
-2. 在该测试账户启用 [Customer Portal](https://dashboard.stripe.com/test/settings/billing/portal)，允许查看账单、更新支付方式及取消订阅。此实验不提供套餐切换、试用期、折扣或延迟支付方式。
+2. 在该测试账户启用 [Customer Portal](https://dashboard.stripe.com/test/settings/billing/portal)，允许查看账单、更新支付方式及取消订阅。此实验不提供套餐切换、试用期或折扣；支付方式由 Stripe 动态选择，延迟付款仅在实际到账并收到通知后解锁。
 3. 运行 `npm run setup:billing`。它生成被 Git 忽略的 `.dev.vars` 和随机 Cookie 签名密钥，不会覆盖已有配置，也不会输出密钥。
-4. 仅在本地 `.dev.vars` 中填写 `STRIPE_SECRET_KEY=sk_test_…`、`STRIPE_PRICE_LIFETIME=price_…` 和/或 `STRIPE_PRICE_MONTHLY=price_…`。不要把密钥发到聊天、放在前端或提交到 Git。
-5. 启动：
+4. 仅在本地 `.dev.vars` 中填写 `STRIPE_SECRET_KEY=rk_test_…`（优先使用受限密钥，也支持 `sk_test_…`）、`STRIPE_ACCOUNT_ID=acct_…`、`STRIPE_PORTAL_CONFIGURATION=bpc_…`、`STRIPE_PRICE_LIFETIME=price_…` 和/或 `STRIPE_PRICE_MONTHLY=price_…`。不要把密钥发到聊天、放在前端或提交到 Git。
+5. 在一个终端运行 `npm run listen:stripe`，使用固定版本 Stripe CLI 1.54.0 转发本沙盒事件。脚本读取本地密钥，验证账户，自动把签名密钥写入 `.dev.vars`，不输出密钥。看到“Webhook 已连接”后保持该进程运行，再在另一个终端启动：
 
    ```bash
    npm run build
    npm run dev:billing
    ```
 
-6. 打开 [本地支付测试](http://127.0.0.1:8788)。导入并修改二维码，点击下载应先弹出购买方案。选择方案会在新标签页打开 Stripe，原标签页图片不会丢失。
-7. 在 Stripe 结账页使用测试卡 `4242 4242 4242 4242`、未来有效期和任意三位 CVC，完成后回到原编辑标签页，点击“刷新购买状态”，再下载并回扫。可用 `4000 0000 0000 0002` 测试拒付。禁止在沙盒中使用真实银行卡。
-8. 分别验证取消结账、退款、订阅到期/取消、续费失败、浏览器刷新和 API 断网。将 `.dev.vars` 的 `BILLING_EXPERIMENT` 改为 `adfree` 并重启，验证免费导出及付费隐藏占位区。
+6. 如果 Stripe CLI 长时间停在 `Getting ready...`，说明 WebSocket 尚未就绪。本轮本机访问 `stripecli-ws-nw.stripe.com` 超时，但 REST API 可用；可停止监听进程，改用 `npm run sync:stripe -- --watch`。它每 5 秒从 Stripe 拉取真实事件，在本地签名重放到同一个处理器，不会修改付款状态；这不等于验收了 Stripe 到公网 HTTPS 端点的投递。仍须保留 `dev:billing` 运行。
+7. 打开 [本地支付测试](http://127.0.0.1:8788)。导入并修改二维码，点击下载应先弹出购买方案。选择方案会在新标签页打开 Stripe，原标签页图片不会丢失。
+8. 在 Stripe 结账页使用测试卡 `4242 4242 4242 4242`、未来有效期和任意三位 CVC，完成后回到原编辑标签页，点击“刷新购买状态”，再下载并回扫。可用 `4000 0000 0000 0002` 测试拒付。禁止在沙盒中使用真实银行卡。
+9. 分别验证取消结账、退款、订阅到期/取消、续费失败、浏览器刷新和 API 断网。将 `.dev.vars` 的 `BILLING_EXPERIMENT` 改为 `adfree` 并重启，验证免费导出及付费隐藏占位区。
 
-此版硬性拒绝 `sk_live_…` 及 Stripe 返回的 `livemode=true`。真实 Stripe Hosted Checkout 需要手动使用测试卡验证；自动化测试使用明确的 Stripe 替身，不会提交真实付款或伪装成真实沙盒验收。
+`dev:billing` 使用本地 D1 绑定 `BILLING_DB`，首次请求创建订单表和通知去重表，数据保存在被忽略的 `.wrangler/` 中，不创建线上数据库。受限 API 密钥需要读取账户、价格、Checkout、PaymentIntent、账单付款和订阅，以及创建/过期 Checkout 和创建 Customer Portal 会话的权限；本地 CLI 还需要监听事件权限，具体权限在沙盒验证。
+
+此版硬性拒绝 `sk_live_…`、`rk_live_…` 及 Stripe 返回的 `livemode=true`。真实 Stripe Hosted Checkout 需要手动使用测试卡验证；自动化测试使用明确的 Stripe 替身，不会提交真实付款或伪装成真实沙盒验收。
 
 ### 购买状态与账号决策
 
-服务端创建 Checkout 后立即写入签名、HttpOnly、SameSite Cookie，绑定匿名浏览器和该 Checkout。刷新购买状态、返回应用或再次导出时，服务端都会重新读取 Stripe 的付款、退款/争议、订阅期限和最新账单状态。无需等待成功跳转才记录 Checkout，关掉支付标签页后仍可在原浏览器查询。URL 参数和 `localStorage` 中的“已支付”不能授予权益；网络错误不会沿用旧的已付费状态。
+服务端创建 Checkout 后保存 D1 订单，并写入签名、HttpOnly、SameSite Cookie，绑定匿名浏览器和该 Checkout。刷新购买状态、返回应用或再次导出时，服务端都会重新读取 Stripe 的付款、退款/争议、订阅期限和最新账单状态。Webhook 校验原始请求签名和五分钟时间窗口，处理 Checkout 完成/异步成功/失败、订阅变化、账单付款/失败、退款与争议。每次通知重新查询 Stripe 当前状态，并将订单更新与事件 ID 原子保存，重复或乱序通知不会重复发放权益。只有经过 Webhook 确认且当前支付状态有效才解锁；未收到通知时显示“正在等待支付通知”。无需等待成功跳转才记录 Checkout，关掉支付标签页后仍可在原浏览器查询。URL 参数和 `localStorage` 中的“已支付”不能授予权益；网络错误不会沿用旧的已付费状态。
 
 当前 Cookie 最长保留一年。更换浏览器、清除 Cookie、轮换签名密钥后不能恢复购买关系，因此“买断”目前只用于测试一次付款流程，**不是正式的永久授权**。只保留当前浏览器最近一笔结账；已解锁时阻止重复购买，待付款时复用原结账，未结束的订阅引导到 Portal 处理。
 
-这轮不加入账号或 Google 登录，避免在尚未确定收费方式前增加账户数据。正式收费前应增加稳定账号（邮箱登录即可，Google 登录可作为可选方式）、数据库中的 customer/订单/权益映射、带签名校验和幂等处理的 webhook，以及恢复购买流程。届时按 [Stripe fulfillment 指南](https://docs.stripe.com/checkout/fulfillment) 验证付款成功、续订、退款和取消事件。此版没有 webhook 或订单数据库，采用按需查询 Stripe 的沙盒方式，不执行后台自动发货、授权邮件或异步续费通知。
+这轮不加入账号或 Google 登录，避免在尚未确定收费方式前增加账户数据。正式收费前应增加稳定账号（经过验证的邮箱登录即可，Google 登录可作为可选方式）、账号与已有订单的关联、购买恢复、生产数据库迁移与运行监控。当前已实现 D1 订单及签名校验、幂等 Webhook，但仍只允许沙盒，且不会发授权邮件。按 [Stripe fulfillment 指南](https://docs.stripe.com/checkout/fulfillment) 验证付款成功、续订、退款和取消事件。
 
 纯浏览器处理和离线使用模式意味着收费入口可以被修改客户端绕过。正式商业模式可以考虑便利功能、持续服务或免广告，但本实验不提供不可绕过的图片处理授权。AdSense 正式接入还需要站点审核、发布商标识、隐私与必要的同意流程，遵守 [AdSense 计划政策](https://support.google.com/adsense/answer/48182?hl=zh-Hans)。
 
 ### Pages 打包与配置补充
 
-以下是收费实验对前述“仅静态产物”说明的补充：`scripts/build.mjs` 还把 `server/billing.mjs` 打包为 `dist/_worker.js`，生成只匹配 `/api/*` 的 `_routes.json`。服务器代码、路由配置和公开静态资源一起作为已检查的 `dist/` artifact 发布；`.dev.vars`、示例、测试和文档均不上传。没有新增线上配置文件或在 CI 中配置 Stripe 密钥。
+以下是收费实验对前述“仅静态产物”说明的补充：`scripts/build.mjs` 还把 `server/billing.mjs` 打包为 `dist/_worker.js`，生成只匹配 `/api/*` 的 `_routes.json`，以及限制脚本、连接、嵌入等来源的 `_headers`。服务器代码、路由配置和公开静态资源一起作为已检查的 `dist/` artifact 发布；`.dev.vars`、示例、测试和文档均不上传。没有新增线上配置文件或在 CI 中配置 Stripe 密钥。
 
-`_deployment.json.files` 仍包含所有公开静态资源的 SHA-256；`server` 字段记录服务端源文件和路由摘要。Pages 不公开 `_worker.js` / `_routes.json`，所以线上验证通过 `/api/deployment` 检查其编入的提交号和源文件/路由摘要，而非下载服务端代码。`npm run test:pages` 会在真正的本地 Pages runtime 中加载同一构建产物并校验 API 与静态资源。CI 会在原有检查之外执行该命令。
+`_deployment.json.files` 仍包含所有公开静态资源的 SHA-256；`server` 字段记录服务端源文件、路由和安全响应头摘要。Pages 不公开 `_worker.js` / `_routes.json` / `_headers`，所以线上验证通过 `/api/deployment` 检查其编入的提交号和源文件/路由摘要，而非下载服务端代码。`npm run test:pages` 会在真正的本地 Pages runtime 中加载同一构建产物并校验 API 与静态资源。CI 会在原有检查之外执行该命令。
 
 如要在线测试，在现有 Pages 项目的控制台中设置以下配置；先使用受控测试环境，确认后再发布。代码不会替你修改线上变量、域名、绑定或 Secret：
 
@@ -203,9 +206,41 @@ npm run verify:deployment
 | --- | --- |
 | `BILLING_EXPERIMENT` | `off`、`exports` 或 `adfree` |
 | `BILLING_ORIGIN` | 实际访问的完整 origin，不带尾斜杠，例如 `https://qr-replace.pages.dev`；预览域名需要自己的配置 |
-| `STRIPE_SECRET_KEY`（Secret） | 目标账户的 `sk_test_…` |
+| `STRIPE_SECRET_KEY`（Secret） | 目标账户的 `rk_test_…` 或 `sk_test_…` |
+| `STRIPE_ACCOUNT_ID` | 明确锁定的沙盒账户 ID |
+| `STRIPE_WEBHOOK_SECRET`（Secret） | 当前环境的 `whsec_…`，线上端点和本地 CLI 各自独立 |
+| `STRIPE_PORTAL_CONFIGURATION` | 本沙盒的客户门户配置 ID |
+| `BILLING_DB`（D1 绑定） | 保存订单和通知去重信息的数据库，线上由控制台配置 |
 | `BILLING_COOKIE_SECRET`（Secret） | 独立随机的至少 32 字符密钥 |
 | `STRIPE_PRICE_LIFETIME` | 测试模式的一次性价格 ID，可省略 |
 | `STRIPE_PRICE_MONTHLY` | 测试模式的每月价格 ID，可省略；两种价格至少填一种 |
 
 使用 `npm run check`、`npm run build`、`npx --no-install playwright install chromium`、`npm run test:browser` 和 `npm run test:pages` 验证。支付测试涵盖两种收费模式、购买前后 PNG 回扫、付款状态、Cookie 篡改、CSRF、退款、订阅、Portal、网络失败与 `file://` 兼容。现有 GitHub Actions 的生产分支条件与部署凭据隔离保持不变。
+
+### 本次 Stripe 官方集成计划（2026-10-19）
+
+已通过 Stripe 插件 `stripe_implementation_planner` 生成并接受计划 `iguide_61VbgYcAltYLDCHlw41Dq6DeSheLU`。选定网页托管 Checkout、自助购买、固定价格、预付、Customer Portal。规划工具同时提供 Accounts v2 门户示例，但当前应用已有 Customers v1 流程，保留其 `customer` 绑定，不混用 `customer_account`。没有启用 Managed Payments、报价销售、自动税或真实收费。
+
+| 沙盒配置 | 已配置值 |
+| --- | --- |
+| 账户 | `qrcodeReplace 沙盒` / `acct_1USIMHDq6DeSheLU` |
+| 商品 | `prod_VTF6e1VHscyMsc`，qrcodeReplace 高级功能（沙盒测试） |
+| 同一高级功能的买断价格 | `price_1USIccDq6DeSheLUD0qGgenn`，USD 5 / 次 |
+| 同一高级功能的月订阅价格 | `price_1USIctDq6DeSheLUiguO97If`，USD 1 / 月 |
+| 客户门户 | `bpc_1USIcyDq6DeSheLUlXymzw4D`，账单、支付方式更新、到期取消 |
+
+以上均是测试对象；价格只是联调占位。默认先测试 `exports`；`adfree` 保留为另一种实验。
+
+按官方计划核对后的实现：
+
+- API 固定为 `2026-09-30.endive`，使用当前订阅条目的期限和独立 `InvoicePayment` 关联，不依赖旧版 invoice.payment_intent。
+- Checkout 使用动态支付方式、Adaptive Pricing 和独立 integration identifier；买断启用 `invoice_creation`，订阅使用 flexible billing 并自动开账单。
+- 此沙盒账户默认启用了 Managed Payments；本应用按已选普通 Payments 方案，在每笔 Checkout 显式传 `managed_payments[enabled]=false`，不改账户默认设置。
+- Secret 仅在后端使用；支持受限密钥，并在创建结账时检查密钥对应的账户。前端无需可发布密钥或 Stripe.js。
+- 本地 Stripe CLI 仅监听本沙盒；线上测试必须在 Stripe 建立指向实际 HTTPS `/api/billing/webhook` 的端点，并在 Pages 控制台配置对应签名 Secret 和 D1 绑定。代码不接管线上配置。
+- 沙盒验收：买断/订阅 Checkout、未付款不解锁、通知后解锁、未返回成功页、重复/乱序通知、退款、续费失败、到期取消、Portal、两种实验和 PNG 回扫。
+- 正式收费前确认收费模型和售价、添加账号与购买恢复、运行监控和数据迁移。Stripe Tax 需要先确认实际税务义务及有效注册，本轮不启用 `automatic_tax`；参见 [订阅税费配置](https://docs.stripe.com/billing/taxes/collect-taxes)。
+
+本地重新 `npm run build` 后请重启 `dev:billing`，因为打包会重建 dist 目录，旧运行进程不一定重新加载服务端文件。
+
+本轮实际沙盒联调已完成 USD 5 买断与 USD 1/月订阅，均由 Hosted Checkout 使用官方测试卡付款，Stripe 返回 `paid`，并生成对应 Invoice；本地事件重放后服务端返回 `paid: true`。买断解锁后实际下载 PNG，再重新导入识别，内容与预期替换内容一致。月订阅已通过 Portal 取消续订，Stripe 显示于 2026-11-19 终止；服务端确认本期仍 `paid: true` 且 `cancelAtPeriodEnd: true`，兼容 flexible billing 使用 `cancel_at` 表达期末取消的情况。自动回归另外覆盖退款、拒绝伪造通知、取消/到期、延迟付款和 PNG 下载回扫。公网 HTTPS Webhook 尚未部署与验收，本地 CLI WebSocket 连接超时的限制仍存在。

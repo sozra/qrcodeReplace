@@ -31,11 +31,14 @@ async function hashes(directory, prefix = '') {
 
 const commit = process.env.GITHUB_SHA || execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
 const files = await hashes('dist');
+// Hosted Checkout opens in a separate tab; no third-party scripts/frames run in the editor.
+const headers = "/*\n  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; worker-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'none'\n  Referrer-Policy: no-referrer\n  X-Content-Type-Options: nosniff\n";
+await writeFile('dist/_headers', headers);
 const source = await readFile('server/billing.mjs', 'utf8');
 const routes = `${JSON.stringify({ version: 1, include: ['/api/*'], exclude: [] }, null, 2)}\n`;
-const server = { sourceSha256: createHash('sha256').update(source).digest('hex'), routesSha256: createHash('sha256').update(routes).digest('hex') };
+const server = { sourceSha256: createHash('sha256').update(source).digest('hex'), routesSha256: createHash('sha256').update(routes).digest('hex'), headersSha256: createHash('sha256').update(headers).digest('hex') };
 await writeFile('dist/_worker.js', `const QR_DEPLOYMENT = ${JSON.stringify({ commit, ...server })};\n${source}`);
 await writeFile('dist/_routes.json', routes);
-// Pages executes these two files; they are not publicly downloadable static assets.
+// Pages consumes the worker, routes and headers; they are not public static assets.
 await writeFile('dist/_deployment.json', `${JSON.stringify({ commit, files, server }, null, 2)}\n`);
 console.log(`Static site and optional Pages billing API packaged in dist/ for ${commit}.`);
