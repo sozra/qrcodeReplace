@@ -73,7 +73,8 @@ export function createAuth(googleFetch = fetch) {
     if (!code || code.length > 4096 || (url.searchParams.has('iss') && url.searchParams.get('iss') !== 'https://accounts.google.com')) return redirect(env, 'invalid', cleared);
     let identity, stage = 'token_request', providerError;
     try {
-      const response = await googleFetch('https://oauth2.googleapis.com/token', { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(10000),
+      // workerd supports manual/follow; reject non-2xx below without following redirects.
+      const response = await googleFetch('https://oauth2.googleapis.com/token', { method: 'POST', redirect: 'manual', signal: AbortSignal.timeout(10000),
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ code, client_id: env.GOOGLE_CLIENT_ID, client_secret: env.GOOGLE_CLIENT_SECRET,
           redirect_uri: `${env.BILLING_ORIGIN}/api/auth/google/callback`, grant_type: 'authorization_code', code_verifier: flow.verifier }) });
       if (!response.ok) {

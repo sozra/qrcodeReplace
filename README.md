@@ -272,3 +272,5 @@ Google Cloud 项目为 `qrcodereplace`，应用名称 `qrcodeReplace`。首次�
 新增 `auth_users`、`auth_sessions`、`auth_flows`、`billing_owners`、`billing_checkout_locks` 表，以幂等方式在首次请求时建立，保留原订单和通知表。订单中的旧买家 ID 不改写，通过所有者关系关联到账号；服务端按账号查询所有购买记录，仍须由已验签 Webhook 确认并复查 Stripe 当前状态才能解锁。创建结账页按账号加锁，跨浏览器复用待付款会话，避免重复创建订阅。关联了多个历史 Stripe 客户时，界面提供账单账户选择。
 
 `jose` 与 `esbuild` 是固定在 lockfile 的发布依赖；构建时把后端及 JWT 校验器打包为单个 `_worker.js`，前端、离线使用和严格 CSP 保持原有方式。受限 Stripe API 密钥还需要创建 Customer 的权限。自动化测试使用本地 RSA 签名的 Google 协议替身，验证登录回调和跨浏览器恢复，但不代替真实 Google OAuth 授权验收。
+
+`npm run test:pages` 还会通过固定版本的 Miniflare，在真实 workerd 中运行已构建的 OAuth 回调，验证出站请求、RS256 签名、D1 会话和退出，并确认 Google 令牌请求不会跟随重定向。令牌请求采用 `redirect: 'manual'` 并拒绝非成功响应，兼容 Pages 运行时。登录失败日志只记录固定阶段和错误类别，不记录授权码、密钥、token、个人资料或上游原始错误。

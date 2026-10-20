@@ -9,7 +9,7 @@
     "check": "node scripts/check.mjs",
     "build": "node scripts/build.mjs",
     "test:browser": "node scripts/test-browser.mjs",
-    "test:pages": "node scripts/test-pages.mjs",
+    "test:pages": "node scripts/test-pages.mjs && node scripts/test-auth-runtime.mjs",
     "dev:billing": "wrangler pages dev dist --ip 127.0.0.1 --port 8788 --compatibility-date 2026-10-19 --d1 BILLING_DB",
     "listen:stripe": "node scripts/listen-stripe.mjs",
     "sync:stripe": "node scripts/sync-stripe-events.mjs",
@@ -20,6 +20,7 @@
   "devDependencies": {
     "esbuild": "0.28.2",
     "jose": "6.2.12",
+    "miniflare": "5.20261012.1-beta",
     "playwright": "1.64.1",
     "wrangler": "4.151.1"
   }
