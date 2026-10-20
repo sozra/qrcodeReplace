@@ -2,7 +2,9 @@
   "name": "qr-replace",
   "version": "1.0.0",
   "private": true,
-  "engines": { "node": ">=24" },
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
     "check": "node scripts/check.mjs",
     "build": "node scripts/build.mjs",
@@ -16,6 +18,8 @@
     "verify:deployment": "node scripts/verify-deployment.mjs"
   },
   "devDependencies": {
+    "esbuild": "0.28.2",
+    "jose": "6.2.12",
     "playwright": "1.64.1",
     "wrangler": "4.151.1"
   }

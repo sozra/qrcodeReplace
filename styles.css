@@ -27,6 +27,12 @@
 .billing-plan small { line-height: 1.6; color: var(--muted); }
 .billing-dialog .billing-note { font-size: 12px; }
 .billing-actions { flex-wrap: wrap; }
+.billing-account { padding: 14px; border: 1px solid var(--line-strong); border-radius: 10px; }
+.account-summary { overflow-wrap: anywhere; }
+.google-login { background: #fff; color: #1f1f1f; border: 1px solid #747775; font-weight: 500; }
+.google-login:hover:not(:disabled) { background: #f2f2f2; }
+.billing-account .field-hint { margin-top: 10px; }
+#billingAccountSelect { width: 100%; margin: 8px 0; }
 .billing-ad { padding: 18px 10px; margin-top: 14px; text-align: center; border: 1px dashed var(--line-strong); color: var(--muted); font-size: 12px; line-height: 1.8; border-radius: 8px; }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }

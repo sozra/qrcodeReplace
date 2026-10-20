@@ -254,3 +254,21 @@ npm run verify:deployment
 - 公网 Webhook 为 `https://qr-replace.pages.dev/api/billing/webhook`，端点 ID `we_1USJ7kDq6DeSheLU43bS1SiD`，事件 API 版本 `2026-09-30.endive`。仅接收本沙盒的 Checkout、订阅、账单、退款和争议事件。
 - Stripe API 密钥、公网 Webhook 签名密钥和独立的 Cookie 签名密钥在 Pages 控制台以 Secret 保存；公网签名密钥与本地 CLI 的密钥不同，不进入 Git 或构建产物。
 - 线上直接接收 Stripe HTTPS 通知，不运行本地 `sync:stripe` 重放脚本。部署后需用线上应用创建新测试订单，验证真实通知投递、付款解锁和 PNG 下载回扫；本地购买 Cookie 不迁移到线上。
+
+### Google 登录与跨设备权益（本次更新）
+
+新增账号版继续使用上面的 Pages 项目、D1 绑定和 Stripe 沙盒。上文匿名浏览器版的 Cookie 恢复限制属于初版行为；账号版购买前需要 Google 登录，登录同一 Google 账号即可在其他浏览器或设备恢复有效权益。旧浏览器仍持有有效购买 Cookie 时，可点击“Google 登录并绑定本浏览器购买”迁移旧订单；清除了旧 Cookie 的匿名订单不能仅凭付款邮箱认领，已绑定订单也不能迁给另一个账号。
+
+Google Cloud 项目为 `qrcodereplace`，应用名称 `qrcodeReplace`。首次配置步骤：
+
+1. 在 Google Auth Platform 配置应用身份，目标对象选择“外部”，保持测试状态，按控制台要求添加测试用户。
+2. 创建 **Web 应用** OAuth 客户端。已获授权重定向 URI 必须逐字匹配 `https://qr-replace.pages.dev/api/auth/google/callback`。本机联调可额外添加 `http://127.0.0.1:8788/api/auth/google/callback`。本实现采用服务端授权码流程，不嵌入 Google 脚本，不需要 JavaScript 来源配置。
+3. 在现有 Pages 项目的生产环境控制台添加 `GOOGLE_CLIENT_ID`（文本）及 `GOOGLE_CLIENT_SECRET`（Secret）。本地值仅填入被忽略的 `.dev.vars`。不要在聊天、Git、构建产物或 CI 中保存密钥；CI 只部署已检查的 artifact。
+4. 保留 `BILLING_EXPERIMENT=exports`、现有 D1 与全部 Stripe 沙盒配置，重新发布后验证 Google 登录。没有 Google 配置时新购买保持关闭，旧的有效匿名购买仍可使用，待配置完成再绑定。
+5. 先在原购买浏览器登录并绑定旧记录，再用另一个浏览器登录同一 Google 账号，确认恢复导出和账单管理；不同账号不能看到原权益。新购买同样使用测试卡，退款与订阅失效后所有设备都会重新校验并停止授权。
+
+服务端仅用 Google 已签名 ID Token 的稳定 `sub` 标识账号，邮箱和姓名用于显示与创建 Stripe 沙盒客户，邮箱相同不会合并账号。授权请求包含一次性 `state`、`nonce` 和 PKCE；`jose` 校验 Google 签名、签发者、受众、有效期和邮箱验证状态。授权码和 Google token 不保存，OAuth 临时记录十分钟过期。登录 Cookie 在 HTTPS 上使用 `__Host-`、HttpOnly、Secure、SameSite=Lax；D1 只保存随机会话 token 的 SHA-256 摘要，登录有效期三十天，退出立即撤销当前会话。Cookie 不包含付费授权状态。
+
+新增 `auth_users`、`auth_sessions`、`auth_flows`、`billing_owners`、`billing_checkout_locks` 表，以幂等方式在首次请求时建立，保留原订单和通知表。订单中的旧买家 ID 不改写，通过所有者关系关联到账号；服务端按账号查询所有购买记录，仍须由已验签 Webhook 确认并复查 Stripe 当前状态才能解锁。创建结账页按账号加锁，跨浏览器复用待付款会话，避免重复创建订阅。关联了多个历史 Stripe 客户时，界面提供账单账户选择。
+
+`jose` 与 `esbuild` 是固定在 lockfile 的发布依赖；构建时把后端及 JWT 校验器打包为单个 `_worker.js`，前端、离线使用和严格 CSP 保持原有方式。受限 Stripe API 密钥还需要创建 Customer 的权限。自动化测试使用本地 RSA 签名的 Google 协议替身，验证登录回调和跨浏览器恢复，但不代替真实 Google OAuth 授权验收。

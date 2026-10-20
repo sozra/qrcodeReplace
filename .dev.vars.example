@@ -9,3 +9,7 @@ STRIPE_PORTAL_CONFIGURATION=
 STRIPE_PRICE_LIFETIME=
 STRIPE_PRICE_MONTHLY=
 BILLING_COOKIE_SECRET=
+# Google Cloud -> Google Auth Platform -> Web application OAuth client.
+# Redirect URI: BILLING_ORIGIN + /api/auth/google/callback
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=

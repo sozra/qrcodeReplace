@@ -1,21 +1,15 @@
+import { BillingError, json, key, limitedText, limitedJSON, sameOrigin } from './shared.mjs';
+import { database } from './store.mjs';
+import { createAuth, authConfigured } from './auth.mjs';
 // Sandbox-only Pages backend. Images and QR contents never reach these routes.
 // No cached entitlement: every status/export check reads authoritative Stripe state.
 const API_VERSION = '2026-09-30.endive';
 const APP = 'qr-replace-sandbox-v1';
 const INTEGRATION = 'qrcode-replace-ptkzmhqw';
-const YEAR = 365 * 24 * 60 * 60;
 const encoder = new TextEncoder();
 const plans = { lifetime: 'STRIPE_PRICE_LIFETIME', monthly: 'STRIPE_PRICE_MONTHLY' };
 const build = typeof QR_DEPLOYMENT === 'undefined' ? null : QR_DEPLOYMENT;
 
-class BillingError extends Error {
-  constructor(status, message) { super(message); this.status = status; }
-}
-function json(data, status = 200, cookies = []) {
-  const headers = new Headers({ 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' });
-  for (const cookie of cookies) headers.append('Set-Cookie', cookie);
-  return new Response(JSON.stringify(data), { status, headers });
-}
 function config(env, url) {
   const experiment = env.BILLING_EXPERIMENT || 'off';
   if (experiment === 'off') return { enabled: false, experiment };
@@ -29,62 +23,6 @@ function config(env, url) {
     && (url.protocol === 'https:' || ['localhost', '127.0.0.1'].includes(url.hostname))
     && Object.values(plans).some(key => /^price_[a-zA-Z0-9]+$/.test(env[key] || ''));
   return { enabled: true, configured, experiment, testMode: true };
-}
-function b64(bytes) { return btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, ''); }
-function unb64(value) { return Uint8Array.from(atob(value.replaceAll('-', '+').replaceAll('_', '/')), ch => ch.charCodeAt(0)); }
-async function key(secret) { return crypto.subtle.importKey('raw', encoder.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign', 'verify']); }
-async function sign(value, secret) {
-  const payload = b64(encoder.encode(JSON.stringify({ ...value, exp: Math.floor(Date.now() / 1000) + YEAR })));
-  return `${payload}.${b64(new Uint8Array(await crypto.subtle.sign('HMAC', await key(secret), encoder.encode(payload))))}`;
-}
-async function readCookie(request, name, env) {
-  try {
-    const value = (request.headers.get('cookie') || '').split(';').map(s => s.trim()).find(s => s.startsWith(`${name}=`))?.slice(name.length + 1);
-    if (!value || value.length > 2048) return null;
-    const parts = value.split('.');
-    if (parts.length !== 2 || !await crypto.subtle.verify('HMAC', await key(env.BILLING_COOKIE_SECRET), unb64(parts[1]), encoder.encode(parts[0]))) return null;
-    const data = JSON.parse(new TextDecoder().decode(unb64(parts[0])));
-    return data.exp > Date.now() / 1000 && data.kind === name ? data : null;
-  } catch { return null; }
-}
-async function cookie(name, value, env, url) {
-  return `${name}=${await sign({ ...value, kind: name }, env.BILLING_COOKIE_SECRET)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${YEAR}${url.protocol === 'https:' ? '; Secure' : ''}`;
-}
-async function limitedText(message, limit) {
-  const reader = message.body?.getReader();
-  if (!reader) throw new BillingError(400, '请求内容为空');
-  const chunks = []; let size = 0;
-  try {
-    for (;;) {
-      const { done, value } = await reader.read(); if (done) break;
-      size += value.byteLength;
-      if (size > limit) { await reader.cancel(); throw new BillingError(413, '请求内容过大'); }
-      chunks.push(value);
-    }
-    const bytes = new Uint8Array(size); let offset = 0;
-    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
-    return new TextDecoder().decode(bytes);
-  } catch (error) {
-    if (error instanceof BillingError) throw error;
-    throw new BillingError(400, '无法读取请求内容');
-  } finally { reader.releaseLock(); }
-}
-async function limitedJSON(message, limit) {
-  const text = await limitedText(message, limit);
-  try { return JSON.parse(text); } catch { throw new BillingError(400, '无法读取请求内容'); }
-}
-
-// Sandbox schema initialization is idempotent; no remote provisioning/configuration.
-async function database(env) {
-  const db = env.BILLING_DB;
-  await db.batch([
-    db.prepare('CREATE TABLE IF NOT EXISTS billing_orders (session TEXT PRIMARY KEY, buyer TEXT NOT NULL, plan TEXT NOT NULL, price TEXT NOT NULL, customer TEXT, subscription TEXT, payment_intent TEXT, confirmed INTEGER NOT NULL DEFAULT 0, paid INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL DEFAULT \'pending\', created INTEGER NOT NULL)'),
-    db.prepare('CREATE TABLE IF NOT EXISTS billing_events (id TEXT PRIMARY KEY, type TEXT NOT NULL, processed INTEGER NOT NULL)'),
-    db.prepare('CREATE INDEX IF NOT EXISTS billing_orders_buyer ON billing_orders(buyer, created)'),
-    db.prepare('CREATE INDEX IF NOT EXISTS billing_orders_customer ON billing_orders(customer)'),
-    db.prepare('CREATE INDEX IF NOT EXISTS billing_orders_subscription ON billing_orders(subscription)'),
-  ]);
-  return db;
 }
 async function verifiedEvent(request, env) {
   const raw = await limitedText(request, 256 * 1024);
@@ -101,7 +39,8 @@ async function verifiedEvent(request, env) {
   return event;
 }
 
-export function createBillingHandler(stripeFetch = fetch) {
+export function createBillingHandler(stripeFetch = fetch, googleFetch = fetch) {
+  const auth = createAuth(googleFetch);
   async function stripe(env, path, params, idempotencyKey) {
     const headers = { Authorization: `Bearer ${env.STRIPE_SECRET_KEY}`, 'Stripe-Version': API_VERSION };
     if (params) headers['Content-Type'] = 'application/x-www-form-urlencoded';
@@ -134,7 +73,7 @@ export function createBillingHandler(stripeFetch = fetch) {
       || value.metadata.plan !== receipt.plan || !Object.hasOwn(plans, receipt.plan)
       || value.metadata.price !== receipt.price || line?.length !== 1 || line[0].price?.id !== receipt.price || line[0].quantity !== 1
       || value.mode !== (receipt.plan === 'monthly' ? 'subscription' : 'payment')) {
-      throw new BillingError(403, '无法验证此浏览器的测试购买记录');
+      throw new BillingError(403, '无法验证此账号的测试购买记录');
     }
     if (value.subscription?.latest_invoice?.status === 'paid') {
       const invoice = value.subscription.latest_invoice;
@@ -208,69 +147,99 @@ export function createBillingHandler(stripeFetch = fetch) {
     await db.batch([...updates, db.prepare('INSERT OR IGNORE INTO billing_events (id, type, processed) VALUES (?, ?, ?)').bind(event.id, event.type, Date.now())]);
     return json({ received: true });
   }
+  async function purchases(env, db, user, legacyOrder) {
+    const orders = user ? (await db.prepare('SELECT o.* FROM billing_orders o JOIN billing_owners b ON b.buyer = o.buyer WHERE b.user_id = ? ORDER BY o.confirmed DESC, o.paid DESC, o.created DESC LIMIT 51').bind(user.id).all()).results : legacyOrder ? [legacyOrder] : [];
+    if (orders.length > 50) throw new BillingError(503, '购买记录过多，请联系站点管理员核对');
+    const results = [];
+    for (const order of orders) {
+      const value = await session(env, order, { id: order.buyer });
+      const access = entitlement(value);
+      await record(db, order, value, access).run();
+      if (access.paid && !order.confirmed) { access.paid = false; access.state = 'processing'; }
+      results.push({ order, value, access });
+    }
+    return results;
+  }
   return async function handle(request, env) {
     const url = new URL(request.url);
     if (url.pathname === '/api/deployment' && request.method === 'GET') return json(build);
     if (!url.pathname.startsWith('/api/')) return env.ASSETS.fetch(request);
+    let lock, db;
     try {
-      const routes = { '/api/billing/status': 'GET', '/api/billing/checkout': 'POST', '/api/billing/portal': 'POST', '/api/billing/webhook': 'POST' };
+      const routes = { '/api/billing/status': 'GET', '/api/billing/checkout': 'POST', '/api/billing/portal': 'POST', '/api/billing/webhook': 'POST',
+        '/api/auth/google': 'POST', '/api/auth/google/callback': 'GET', '/api/auth/logout': 'POST' };
       if (!Object.hasOwn(routes, url.pathname)) return json({ error: '未找到接口' }, 404);
       if (request.method !== routes[url.pathname]) return json({ error: '不支持此方法' }, 405);
       const settings = config(env, url);
       if (!settings.enabled) return request.method === 'GET' ? json({ ...settings, paid: false, plans: [] }) : json({ error: '付费测试未开启' }, 503);
       if (!settings.configured) return json({ ...settings, paid: false, plans: [], error: '付费测试尚未配置完成，请检查测试密钥、Webhook、数据库、价格和站点地址' }, 503);
       if (url.pathname.endsWith('/webhook')) return await webhook(request, env);
-      if (request.method === 'POST' && (request.headers.get('origin') !== env.BILLING_ORIGIN || !request.headers.get('content-type')?.startsWith('application/json'))) {
-        throw new BillingError(403, '请求来源无效，请从应用内重试');
+      db = await database(env);
+      if (url.pathname.startsWith('/api/auth/')) return await auth.route(request, env, db);
+      if (request.method === 'POST') sameOrigin(request, env);
+      const user = await auth.user(request, db);
+      const legacyOrder = await auth.legacy(request, env, db);
+      const identity = { configured: authConfigured(env), user: user ? { email: user.email, name: user.name } : null, legacyAvailable: !!legacyOrder };
+      if (request.method === 'POST' && !user) throw new BillingError(401, '请先使用 Google 登录，再购买或管理账号权益');
+      const body = request.method === 'POST' ? await limitedJSON(request, 2048) : null;
+      if (request.method === 'POST' && (!body || typeof body !== 'object' || Array.isArray(body))) throw new BillingError(400, '请求内容无效');
+      if (url.pathname.endsWith('/checkout')) {
+        if (!authConfigured(env)) throw new BillingError(503, 'Google 登录尚未配置，请稍后重试');
+        if (!Object.hasOwn(plans, body.plan) || !/^[a-f0-9-]{36}$/.test(body.requestId || '')) throw new BillingError(400, '购买方案或请求编号无效');
+        // Serialize checkout creation per account across browsers. Always re-read orders after locking.
+        const lockId = crypto.randomUUID(), now = Date.now();
+        const acquired = await db.prepare('INSERT INTO billing_checkout_locks (user_id, request_id, expires) VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET request_id = excluded.request_id, expires = excluded.expires WHERE billing_checkout_locks.expires < ?')
+          .bind(user.id, lockId, now + 180000, now).run();
+        if (!acquired.meta.changes) throw new BillingError(409, '此账号正在创建结账页，请稍后刷新购买状态');
+        lock = { user: user.id, id: lockId };
       }
-      const cookies = [];
-      let buyer = await readCookie(request, 'qr_buyer', env);
-      if (!buyer) {
-        if (request.method !== 'GET') throw new BillingError(403, '请允许本站 Cookie 并刷新购买状态后重试');
-        buyer = { id: crypto.randomUUID() };
-        cookies.push(await cookie('qr_buyer', buyer, env, url));
-      }
-      const db = await database(env);
-      const receipt = await readCookie(request, 'qr_checkout', env);
-      const order = receipt?.buyer === buyer.id ? await db.prepare('SELECT * FROM billing_orders WHERE session = ? AND buyer = ?').bind(receipt.session, buyer.id).first() : null;
-      const current = await session(env, order, buyer);
-      const access = entitlement(current);
-      if (order && current) await record(db, order, current, access).run();
-      if (access.paid && !order?.confirmed) { access.paid = false; access.state = 'processing'; }
+      const owned = await purchases(env, db, user, legacyOrder);
+      const selected = owned.find(p => p.access.paid) || owned.find(p => p.access.state === 'processing') || owned.find(p => p.value.subscription && !['canceled', 'incomplete_expired'].includes(p.value.subscription.status)) || owned.find(p => p.access.state === 'pending') || owned[0];
+      const access = selected?.access || { paid: false, state: 'none', canManage: false };
+      const manageable = owned.filter(p => p.access.canManage);
       if (url.pathname.endsWith('/status')) {
         const available = await Promise.all(Object.entries(plans).filter(([, field]) => env[field]).map(([plan]) => price(env, plan)));
-        return json({ ...settings, ...access, plans: available }, 200, cookies);
+        return json({ ...settings, ...access, canManage: !!user && manageable.length > 0, auth: identity, plans: available,
+          accounts: user ? [...new Set(manageable.map(p => p.value.customer))].map((customer, index) => ({ id: customer, label: `账单账户 ${index + 1}` })) : [] });
       }
-      const body = await limitedJSON(request, 2048);
-      if (!body || typeof body !== 'object' || Array.isArray(body)) throw new BillingError(400, '请求内容无效');
       if (url.pathname.endsWith('/portal')) {
-        if (!access.canManage) throw new BillingError(403, '当前浏览器没有可管理的购买记录');
-        const portal = await stripe(env, 'billing_portal/sessions', { customer: current.customer, ...(env.STRIPE_PORTAL_CONFIGURATION ? { configuration: env.STRIPE_PORTAL_CONFIGURATION } : {}), return_url: `${env.BILLING_ORIGIN}/?billing=portal` });
+        const target = body.customer ? manageable.find(p => p.value.customer === body.customer) : manageable.find(p => p.value.subscription) || manageable[0];
+        if (!target) throw new BillingError(403, '当前账号没有可管理的购买记录');
+        const portal = await stripe(env, 'billing_portal/sessions', { customer: target.value.customer, ...(env.STRIPE_PORTAL_CONFIGURATION ? { configuration: env.STRIPE_PORTAL_CONFIGURATION } : {}), return_url: `${env.BILLING_ORIGIN}/?billing=portal` });
         return json({ url: hostedURL(portal.url, 'billing.stripe.com') });
       }
-      if (!Object.hasOwn(plans, body.plan) || !/^[a-f0-9-]{36}$/.test(body.requestId || '')) throw new BillingError(400, '购买方案或请求编号无效');
-      if (access.paid || entitlement(current).paid) throw new BillingError(409, '付款已完成，请等待支付通知后刷新状态');
-      // A past-due subscription must be managed, not replaced by another subscription.
-      if (current?.subscription && !['canceled', 'incomplete_expired'].includes(current.subscription.status)) throw new BillingError(409, '已有订阅，请先在订阅管理中处理');
-      if (current?.status === 'open' && receipt.plan === body.plan && receipt.price === env[plans[body.plan]]) return json({ url: hostedURL(current.url, 'checkout.stripe.com') });
-      if (current?.status === 'open') await stripe(env, `checkout/sessions/${current.id}/expire`, {});
+      if (owned.some(p => p.access.paid || entitlement(p.value).paid)) throw new BillingError(409, '付款已完成，请等待支付通知后刷新状态');
+      if (owned.some(p => p.value.subscription && !['canceled', 'incomplete_expired'].includes(p.value.subscription.status))) throw new BillingError(409, '已有订阅，请先在订阅管理中处理');
+      const pending = owned.filter(p => p.value.status === 'open');
+      const reusable = pending.find(p => p.order.plan === body.plan && p.order.price === env[plans[body.plan]]);
+      if (reusable) return json({ url: hostedURL(reusable.value.url, 'checkout.stripe.com') });
+      for (const previous of pending) await stripe(env, `checkout/sessions/${previous.value.id}/expire`, {});
       await price(env, body.plan);
       const account = await stripe(env, 'account');
       if (account.id !== env.STRIPE_ACCOUNT_ID) throw new BillingError(503, '测试密钥与所选沙盒账户不一致');
-      const params = { mode: body.plan === 'monthly' ? 'subscription' : 'payment', 'line_items[0][price]': env[plans[body.plan]], 'line_items[0][quantity]': '1',
-        integration_identifier: INTEGRATION, 'managed_payments[enabled]': 'false', 'adaptive_pricing[enabled]': 'true', client_reference_id: buyer.id, 'metadata[app]': APP, 'metadata[plan]': body.plan, 'metadata[price]': env[plans[body.plan]],
+      let customer = user.stripe_customer;
+      if (!customer) {
+        const created = await stripe(env, 'customers', { email: user.email, name: user.name, 'metadata[app]': APP, 'metadata[user_id]': user.id }, `${APP}-customer-${user.id}`);
+        if (created.livemode !== false || !/^cus_[a-zA-Z0-9]+$/.test(created.id || '')) throw new BillingError(502, '仅允许 Stripe 沙盒客户');
+        customer = created.id;
+        await db.prepare('UPDATE auth_users SET stripe_customer = ? WHERE id = ?').bind(customer, user.id).run();
+      }
+      const params = { mode: body.plan === 'monthly' ? 'subscription' : 'payment', customer, 'line_items[0][price]': env[plans[body.plan]], 'line_items[0][quantity]': '1',
+        integration_identifier: INTEGRATION, 'managed_payments[enabled]': 'false', 'adaptive_pricing[enabled]': 'true', client_reference_id: user.id,
+        'metadata[app]': APP, 'metadata[plan]': body.plan, 'metadata[price]': env[plans[body.plan]], 'metadata[user_id]': user.id,
         success_url: `${env.BILLING_ORIGIN}/?billing=success`, cancel_url: `${env.BILLING_ORIGIN}/?billing=cancel` };
-      if (body.plan === 'lifetime') { params.customer_creation = 'always'; params['invoice_creation[enabled]'] = 'true'; }
+      if (body.plan === 'lifetime') params['invoice_creation[enabled]'] = 'true';
       else params['subscription_data[billing_mode][type]'] = 'flexible';
-      const checkout = await stripe(env, 'checkout/sessions', params, `${APP}-${buyer.id}-${body.requestId}`);
+      const checkout = await stripe(env, 'checkout/sessions', params, `${APP}-${user.id}-${body.requestId}`);
       if (checkout.livemode !== false || !/^cs_test_[a-zA-Z0-9]+$/.test(checkout.id || '')) throw new BillingError(502, '仅允许 Stripe 测试支付');
       const checkoutURL = hostedURL(checkout.url, 'checkout.stripe.com');
       await db.prepare('INSERT OR IGNORE INTO billing_orders (session, buyer, plan, price, created) VALUES (?, ?, ?, ?, ?)')
-        .bind(checkout.id, buyer.id, body.plan, env[plans[body.plan]], Date.now()).run();
-      cookies.push(await cookie('qr_checkout', { buyer: buyer.id, session: checkout.id, plan: body.plan, price: env[plans[body.plan]] }, env, url));
-      return json({ url: checkoutURL }, 200, cookies);
+        .bind(checkout.id, user.id, body.plan, env[plans[body.plan]], Date.now()).run();
+      return json({ url: checkoutURL });
     } catch (error) {
-      return json({ error: error instanceof BillingError ? error.message : '支付状态暂时不可用，请稍后重试' }, error instanceof BillingError ? error.status : 502);
+      return json({ error: error instanceof BillingError ? error.message : '支付或登录状态暂时不可用，请稍后重试' }, error instanceof BillingError ? error.status : 502);
+    } finally {
+      if (lock) await db.prepare('DELETE FROM billing_checkout_locks WHERE user_id = ? AND request_id = ?').bind(lock.user, lock.id).run();
     }
   };
 }

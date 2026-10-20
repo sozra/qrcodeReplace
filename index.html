@@ -80,6 +80,9 @@
     <section id="billingPanel" class="group billing-panel hidden" aria-labelledby="billingLabel">
       <div class="group-label row"><h2 id="billingLabel">付费体验</h2><span class="billing-badge">测试模式</span></div>
       <p id="billingSummary" class="field-hint" role="status"></p>
+      <p id="accountSummary" class="field-hint account-summary"></p>
+      <button id="accountLogin" class="btn google-login hidden">使用 Google 账号登录</button>
+      <button id="accountLogout" class="btn ghost hidden">退出登录</button>
       <button id="billingOpen" class="btn ghost">查看测试方案</button>
       <div id="billingAd" class="billing-ad hidden" aria-label="广告占位区">广告展示区域 · 仅用于体验免广告效果<br><small>尚未接入 Google AdSense</small></div>
     </section>
@@ -215,8 +218,14 @@
   <div class="billing-heading"><h2 id="billingTitle">解锁 QR 置换台</h2><span class="billing-badge">Stripe 测试</span></div>
   <p id="billingMessage" role="status"></p>
   <p id="billingBenefit"></p>
+  <section class="billing-account" aria-label="账号与购买权益">
+    <p id="billingIdentity" class="account-summary"></p>
+    <button id="billingLogin" class="btn google-login">使用 Google 账号登录</button>
+    <p id="billingAuthHint" class="field-hint"></p>
+  </section>
   <div id="billingPlans" class="billing-plans"></div>
-  <p class="billing-note">仅使用 Stripe 测试卡。付款在新标签页完成，当前图片与编辑会保留。购买记录由服务端保存，通过此浏览器的 Cookie 识别；清除 Cookie 或更换设备后暂时无法恢复，正式收费前会增加账号恢复机制。</p>
+  <p class="billing-note">仅使用 Stripe 测试卡。登录和付款在新标签页完成，当前图片与编辑会保留。购买后换浏览器或设备，登录同一 Google 账号即可恢复权益。登录信息有效期为 30 天，退出后需要重新登录。</p>
+  <label id="billingAccountSelectLabel" class="hidden">选择账单账户<select id="billingAccountSelect"></select></label>
   <div class="dialog-actions billing-actions">
     <button id="billingPortal" class="btn ghost hidden">管理订阅 / 账单</button>
     <button id="billingRefresh" class="btn ghost">刷新购买状态</button>

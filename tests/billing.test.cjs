@@ -3,7 +3,7 @@ const { test } = require('node:test');
 
 async function setup(overrides = {}) {
   const { createBillingHandler } = await import('../server/billing.mjs');
-  const { stripeFixture, billingEnv, notifyPayment } = await import('./billing-fixture.mjs');
+  const { stripeFixture, billingEnv, notifyPayment, seedAccount } = await import('./billing-fixture.mjs');
   const fixture = stripeFixture(), env = { ...billingEnv(), ...overrides }, handle = createBillingHandler(fixture.fetch), jar = new Map();
   async function request(path = 'status', body, headers = {}) {
     const response = await handle(new Request(`https://qr.example/api/billing/${path}`, { method: body === undefined ? 'GET' : 'POST', headers: {
@@ -12,6 +12,7 @@ async function setup(overrides = {}) {
     for (const value of response.headers.getSetCookie()) { const [name, ...rest] = value.split(';')[0].split('='); jar.set(name, rest.join('=')); }
     return { status: response.status, data: await response.json(), headers: response.headers };
   }
+  await seedAccount(env, jar);
   await request();
   const buy = (plan = 'lifetime') => request('checkout', { plan, requestId: crypto.randomUUID() });
   const notify = (id, overrides) => notifyPayment(handle, env, fixture.sessions.get(id), overrides);
@@ -24,11 +25,13 @@ test('billing is opt-in; live keys, missing signing key and wrong origin fail cl
   }
   const s = await setup({ BILLING_EXPERIMENT: 'off' }); assert.equal((await s.request()).data.enabled, false); assert.equal((await s.buy()).status, 503);
 });
-test('sandbox checkout uses server price, signed HttpOnly cookie and same-origin return', async () => {
+test('sandbox checkout uses server price, authenticated account and same-origin return', async () => {
   const s = await setup(); const r = await s.buy(); assert.equal(r.status, 200);
-  assert.match(r.headers.get('set-cookie'), /HttpOnly; SameSite=Lax/); assert.match(r.headers.get('set-cookie'), /Secure/);
+  assert.equal(r.headers.get('set-cookie'), null);
   const call = s.fixture.calls.find(c => c.path === '/v1/checkout/sessions');
   assert.equal(call.body.get('line_items[0][price]'), 'price_lifetime'); assert.equal(call.body.get('success_url'), 'https://qr.example/?billing=success');
+  assert.equal(call.body.get('client_reference_id'), call.body.get('metadata[user_id]'));
+  assert.match(call.body.get('customer'), /^cus_/);
   assert.equal(call.options.headers['Stripe-Version'], '2026-09-30.endive'); assert.ok(call.options.headers['Idempotency-Key']);
   assert.equal((await s.request()).data.paid, false); assert.equal((await s.request()).data.state, 'pending');
 });
@@ -56,8 +59,8 @@ test('subscription tracks latest invoice, expiry and cancellation; outstanding s
 });
 test('tampered cookies, success query, wrong owner, wrong price and unpaid sessions cannot unlock', async () => {
   const s = await setup(); await s.buy(); const session = s.fixture.complete('cs_test_1'); await s.notify('cs_test_1');
-  const original = s.jar.get('qr_checkout'); s.jar.set('qr_checkout', `${original}broken`); assert.equal((await s.request()).data.paid, false);
-  s.jar.set('qr_checkout', original); const buyer = session.client_reference_id; session.client_reference_id = 'other'; assert.equal((await s.request()).status, 403);
+  const original = s.jar.get('__Host-qr_session'); s.jar.set('__Host-qr_session', `${original}broken`); assert.equal((await s.request()).data.paid, false);
+  s.jar.set('__Host-qr_session', original); const buyer = session.client_reference_id; session.client_reference_id = 'other'; assert.equal((await s.request()).status, 403);
   session.client_reference_id = buyer; session.line_items.data[0].price.id = 'price_other'; assert.equal((await s.request()).status, 403);
   session.line_items.data[0].price.id = 'price_lifetime'; session.payment_status = 'unpaid'; assert.equal((await s.request()).data.paid, false);
   const other = await setup(); assert.equal((await other.request('status?billing=success&paid=true')).data.paid, false);
@@ -65,7 +68,8 @@ test('tampered cookies, success query, wrong owner, wrong price and unpaid sessi
 test('CSRF, arbitrary plans and forged portal customer are rejected or ignored', async () => {
   const s = await setup(); assert.equal((await s.request('checkout', { plan: 'lifetime', requestId: crypto.randomUUID() }, { origin: 'https://evil.example' })).status, 403);
   assert.equal((await s.buy('__proto__')).status, 400); assert.equal((await s.request('portal', { customer: 'cus_other' })).status, 403);
-  await s.buy(); s.fixture.complete('cs_test_1'); await s.request('portal', { customer: 'cus_other' });
+  await s.buy(); s.fixture.complete('cs_test_1'); assert.equal((await s.request('portal', { customer: 'cus_other' })).status, 403);
+  await s.request('portal', {});
   assert.equal(s.fixture.calls.at(-1).body.get('customer'), 'cus_fixture');
 });
 test('pending checkout is reused, changing plans expires it, network failure does not grant access', async () => {

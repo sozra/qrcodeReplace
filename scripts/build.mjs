@@ -1,6 +1,7 @@
 import { cp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import { build as bundle } from 'esbuild';
 
 // Keep the browser app unchanged; package the optional Pages billing backend separately.
 await rm('dist', { recursive: true, force: true });
@@ -34,7 +35,9 @@ const files = await hashes('dist');
 // Hosted Checkout opens in a separate tab; no third-party scripts/frames run in the editor.
 const headers = "/*\n  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; worker-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'none'\n  Referrer-Policy: no-referrer\n  X-Content-Type-Options: nosniff\n";
 await writeFile('dist/_headers', headers);
-const source = await readFile('server/billing.mjs', 'utf8');
+// Bundle the backend and JWT verifier at publish time; the browser app stays dependency-free.
+const compiled = await bundle({ entryPoints: ['server/billing.mjs'], bundle: true, write: false, format: 'esm', platform: 'browser', target: 'es2022', legalComments: 'inline' });
+const source = compiled.outputFiles[0].text;
 const routes = `${JSON.stringify({ version: 1, include: ['/api/*'], exclude: [] }, null, 2)}\n`;
 const server = { sourceSha256: createHash('sha256').update(source).digest('hex'), routesSha256: createHash('sha256').update(routes).digest('hex'), headersSha256: createHash('sha256').update(headers).digest('hex') };
 await writeFile('dist/_worker.js', `const QR_DEPLOYMENT = ${JSON.stringify({ commit, ...server })};\n${source}`);

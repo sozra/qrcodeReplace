@@ -1,9 +1,12 @@
 // In-memory Stripe double used only by tests; never packaged in dist/.
 import { DatabaseSync } from 'node:sqlite';
 import { createHmac } from 'node:crypto';
+import { database } from '../server/store.mjs';
+import { digest } from '../server/auth.mjs';
 
 export function localDatabase() {
   const sqlite = new DatabaseSync(':memory:');
+  let pending = Promise.resolve();
   const db = { prepare(sql) {
     const prepared = values => ({ bind(...args) { return prepared(args); },
       async first() { return sqlite.prepare(sql).get(...values) || null; },
@@ -11,10 +14,14 @@ export function localDatabase() {
       async run() { return { meta: sqlite.prepare(sql).run(...values) }; },
     });
     return prepared([]);
-  }, async batch(statements) {
-    sqlite.exec('BEGIN');
-    try { const results = []; for (const statement of statements) results.push(await statement.run()); sqlite.exec('COMMIT'); return results; }
-    catch (error) { sqlite.exec('ROLLBACK'); throw error; }
+  }, batch(statements) {
+    const task = pending.then(async () => {
+      sqlite.exec('BEGIN');
+      try { const results = []; for (const statement of statements) results.push(await statement.run()); sqlite.exec('COMMIT'); return results; }
+      catch (error) { sqlite.exec('ROLLBACK'); throw error; }
+    });
+    pending = task.catch(() => {});
+    return task;
   } };
   return db;
 }
@@ -41,6 +48,7 @@ export function stripeFixture() {
       const url = new URL(input), path = url.pathname, body = new URLSearchParams(options.body);
       calls.push({ path, body, options });
       if (path === '/v1/account') return send({ id: 'acct_fixture' });
+      if (path === '/v1/customers' && options.method === 'POST') return send({ id: `cus_${body.get('metadata[user_id]').replaceAll('-', '')}`, livemode: false });
       if (path === '/v1/invoice_payments') {
         const session = [...sessions.values()].find(s => s.subscription?.latest_invoice?.id === url.searchParams.get('invoice'));
         return send({ has_more: false, data: session ? [{ livemode: false, amount_paid: 100, payment: { type: 'payment_intent', payment_intent: session.payment_intent } }] : [] });
@@ -70,5 +78,18 @@ export function stripeFixture() {
   };
 }
 export function billingEnv(origin = 'https://qr.example') {
-  return { BILLING_EXPERIMENT: 'exports', BILLING_ORIGIN: origin, STRIPE_SECRET_KEY: 'sk_test_fixture', STRIPE_ACCOUNT_ID: 'acct_fixture', STRIPE_WEBHOOK_SECRET: 'whsec_fixture', BILLING_DB: localDatabase(), BILLING_COOKIE_SECRET: 'fixture-only-cookie-secret-at-least-32-chars', STRIPE_PRICE_LIFETIME: 'price_lifetime', STRIPE_PRICE_MONTHLY: 'price_monthly' };
+  return { BILLING_EXPERIMENT: 'exports', BILLING_ORIGIN: origin, STRIPE_SECRET_KEY: 'sk_test_fixture', STRIPE_ACCOUNT_ID: 'acct_fixture', STRIPE_WEBHOOK_SECRET: 'whsec_fixture', BILLING_DB: localDatabase(), BILLING_COOKIE_SECRET: 'fixture-only-cookie-secret-at-least-32-chars', STRIPE_PRICE_LIFETIME: 'price_lifetime', STRIPE_PRICE_MONTHLY: 'price_monthly', GOOGLE_CLIENT_ID: 'fixture.apps.googleusercontent.com', GOOGLE_CLIENT_SECRET: 'fixture-google-client-secret' };
+}
+
+// Unit-test identity seed only. Real OAuth validation is exercised in auth.test.cjs and browser flow.
+export async function seedAccount(env, jar = new Map(), id = crypto.randomUUID()) {
+  if (!env.BILLING_DB) return null;
+  const db = await database(env), token = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64url');
+  await db.batch([
+    db.prepare('INSERT OR IGNORE INTO auth_users (id, google_sub, email, name, created) VALUES (?, ?, ?, ?, ?)').bind(id, `google-${id}`, 'tester@example.com', 'Test User', Date.now()),
+    db.prepare('INSERT OR IGNORE INTO billing_owners (buyer, user_id) VALUES (?, ?)').bind(id, id),
+    db.prepare('INSERT INTO auth_sessions (token_hash, user_id, expires) VALUES (?, ?, ?)').bind(await digest(token), id, Math.floor(Date.now() / 1000) + 86400),
+  ]);
+  jar.set(`${env.BILLING_ORIGIN.startsWith('https:') ? '__Host-' : ''}qr_session`, token);
+  return { id, token };
 }
