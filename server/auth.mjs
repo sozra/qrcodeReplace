@@ -71,20 +71,32 @@ export function createAuth(googleFetch = fetch) {
     if (url.searchParams.get('error')) return redirect(env, 'cancel', cleared);
     const code = url.searchParams.get('code');
     if (!code || code.length > 4096 || (url.searchParams.has('iss') && url.searchParams.get('iss') !== 'https://accounts.google.com')) return redirect(env, 'invalid', cleared);
-    let identity;
+    let identity, stage = 'token_request', providerError;
     try {
       const response = await googleFetch('https://oauth2.googleapis.com/token', { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(10000),
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ code, client_id: env.GOOGLE_CLIENT_ID, client_secret: env.GOOGLE_CLIENT_SECRET,
           redirect_uri: `${env.BILLING_ORIGIN}/api/auth/google/callback`, grant_type: 'authorization_code', code_verifier: flow.verifier }) });
-      if (!response.ok) { await response.body?.cancel(); throw new Error('token exchange'); }
+      if (!response.ok) {
+        const failure = await limitedJSON(response, 64 * 1024).catch(() => null);
+        if (['invalid_client', 'invalid_grant', 'unauthorized_client', 'invalid_request'].includes(failure?.error)) providerError = failure.error;
+        throw new Error('token exchange');
+      }
+      stage = 'token_response';
       const tokens = await limitedJSON(response, 64 * 1024);
+      stage = 'token_verify';
       const { payload } = await jwtVerify(tokens.id_token, googleKeys, { algorithms: ['RS256'], issuer: ['https://accounts.google.com', 'accounts.google.com'],
         audience: env.GOOGLE_CLIENT_ID, requiredClaims: ['sub', 'iat', 'exp', 'nonce', 'email', 'email_verified'], maxTokenAge: '10m', clockTolerance: 30 });
+      stage = 'identity_claims';
       if (payload.nonce !== flow.nonce || payload.email_verified !== true || typeof payload.sub !== 'string' || payload.sub.length > 255 || !payload.sub
         || typeof payload.email !== 'string' || payload.email.length > 320 || (payload.azp && payload.azp !== env.GOOGLE_CLIENT_ID)
         || (Array.isArray(payload.aud) && payload.aud.length > 1 && payload.azp !== env.GOOGLE_CLIENT_ID)) throw new Error('identity claims');
       identity = payload;
-    } catch { return redirect(env, 'failed', cleared); }
+    } catch (error) {
+      // Log only fixed diagnostic codes, never OAuth codes, tokens, claims or error messages.
+      const verifierError = ['ERR_JWT_CLAIM_VALIDATION_FAILED', 'ERR_JWT_EXPIRED', 'ERR_JWS_SIGNATURE_VERIFICATION_FAILED', 'ERR_JWKS_TIMEOUT', 'ERR_JWKS_NO_MATCHING_KEY', 'ERR_JWKS_INVALID', 'ERR_JOSE_GENERIC', 'ERR_JWS_INVALID'].includes(error?.code) ? error.code : undefined;
+      console.warn('Google login failed', { stage, providerError, verifierError });
+      return redirect(env, 'failed', cleared);
+    }
     // sub is the identity; email is only display/contact data and never merges accounts.
     await db.prepare('INSERT INTO auth_users (id, google_sub, email, name, created) VALUES (?, ?, ?, ?, ?) ON CONFLICT(google_sub) DO UPDATE SET email = excluded.email, name = excluded.name')
       .bind(crypto.randomUUID(), identity.sub, identity.email, typeof identity.name === 'string' ? identity.name.slice(0, 160) : '', now()).run();

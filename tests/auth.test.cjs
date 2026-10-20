@@ -78,6 +78,25 @@ test('login CSRF, cancellation and unavailable provider do not create an account
   const failed = await b.request(callback); assert.match(failed.response.headers.get('location'), /auth=failed/);
   assert.equal((await s.env.BILLING_DB.prepare('SELECT COUNT(*) AS count FROM auth_users').first()).count, 0);
 });
+test('OAuth failure diagnostics never log provider bodies, credentials or arbitrary errors', async t => {
+  const { createBillingHandler } = await import('../server/billing.mjs');
+  const { billingEnv, stripeFixture } = await import('./billing-fixture.mjs');
+  const { googleFixture, client } = await import('./auth-fixture.mjs');
+  const google = await googleFixture(), stripe = stripeFixture(), logs = [];
+  t.mock.method(console, 'warn', (...args) => logs.push(args));
+  for (const mode of ['response', 'exception']) {
+    const handle = createBillingHandler(stripe.fetch, async () => {
+      if (mode === 'response') return Response.json({ error: 'invalid_client', error_description: 'private-token-and-secret' }, { status: 401 });
+      throw Object.assign(new Error('private-token-and-secret'), { code: 'private-token-and-secret' });
+    });
+    const b = client(handle, billingEnv());
+    assert.match((await b.login(google)).response.headers.get('location'), /auth=failed/);
+  }
+  assert.equal(logs.length, 2);
+  assert.equal(logs[0][1].providerError, 'invalid_client');
+  assert.equal(logs[1][1].verifierError, undefined);
+  assert.doesNotMatch(JSON.stringify(logs), /private-token-and-secret/);
+});
 test('legacy browser purchases can be claimed once and cannot be reassigned after logout', async () => {
   const s = await setup(), b = s.browser();
   const { seedAccount } = await import('./billing-fixture.mjs'), { cookie } = await import('../server/shared.mjs');
